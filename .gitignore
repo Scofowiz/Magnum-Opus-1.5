@@ -22,3 +22,8 @@ npm-debug.log*
 .mcp.json
 .DS_Store
 .novawrite-data/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
