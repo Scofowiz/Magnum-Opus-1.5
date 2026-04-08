@@ -1,0 +1,76 @@
+{
+  "name": "magnum-opus",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "setup": "tsx setup/server.ts",
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "start": "npm run build && NODE_ENV=production node --import tsx server/index.ts",
+    "server": "node --import tsx server/index.ts",
+    "client": "vite",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:services": "vitest run tests/services",
+    "test:coverage": "vitest run --coverage",
+    "build": "vite build && node scripts/run-tsc.cjs -p tsconfig.server.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "prepare": "husky"
+  },
+  "dependencies": {
+    "@tiptap/extension-placeholder": "^2.2.0",
+    "@tiptap/pm": "^2.2.0",
+    "@tiptap/react": "^2.2.0",
+    "@tiptap/starter-kit": "^2.2.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.6.2",
+    "cors": "^2.8.5",
+    "docx": "^9.5.1",
+    "dotenv": "^17.2.3",
+    "express": "^4.18.2",
+    "express-rate-limit": "^8.2.1",
+    "file-saver": "^2.0.5",
+    "groq-sdk": "^0.37.0",
+    "html-to-text": "^9.0.5",
+    "openai": "^6.17.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "recharts": "^2.15.4"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.3",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/html-to-text": "^9.0.4",
+    "@types/node": "^20.10.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^4.2.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "autoprefixer": "^10.4.16",
+    "concurrently": "^8.2.2",
+    "eslint": "^10.1.0",
+    "eslint-config-prettier": "^10.1.8",
+    "husky": "^9.1.7",
+    "lint-staged": "^16.2.7",
+    "postcss": "^8.4.32",
+    "prettier": "^3.8.1",
+    "tailwindcss": "^3.4.0",
+    "tsx": "^4.6.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1",
+    "vite": "^7.3.1",
+    "vitest": "^3.2.4"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,css,md}": [
+      "prettier --write"
+    ]
+  }
+}
