@@ -1,6 +1,6 @@
 {
   "name": "magnum-opus",
-  "main": "src/index.ts",
+  "main": "src/worker.ts",
   "compatibility_date": "2025-03-07",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
