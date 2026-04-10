@@ -1,0 +1,9 @@
+server/index.ts
+server/src/prompt/curatedPromptBuilder.ts
+server/src/routes/autonomous.ts
+server/src/routes/generation.ts
+server/src/routes/storyBible.ts
+server/src/services/memory/fourLayerMemory.ts
+src/components/AutonomousWriter.tsx
+src/components/Editor.tsx
+src/index.css

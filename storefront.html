@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magnum Opus - Your Story Bible, Your AI Co-Author</title>
+    <meta name="description" content="AI-powered novel writing assistant with autonomous chapter generation and story bible management">
+    
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,400&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- React and ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+    <style>
+        .rainbow-bar {
+            background: linear-gradient(90deg,
+                #ff0000 0%, #ff7f00 14%, #ffff00 28%, #00ff00 42%,
+                #0000ff 57%, #4b0082 71%, #8f00ff 85%, #ff0000 100%);
+            background-size: 200% 100%;
+            animation: roygbiv 180s linear infinite;
+        }
+        
+        @keyframes roygbiv {
+            0% { background-position: 0% 50%; }
+            100% { background-position: 200% 50%; }
+        }
+        
+        @keyframes float-a {
+            0%, 100% { transform: translateY(0) scale(1); opacity: .12; }
+            50% { transform: translateY(-12px) scale(1.08); opacity: .22; }
+        }
+        
+        @keyframes float-b {
+            0%, 100% { transform: translateY(0) scale(1); opacity: .1; }
+            50% { transform: translateY(-8px) scale(1.05); opacity: .18; }
+        }
+        
+        @keyframes float-c {
+            0%, 100% { transform: translateY(2px) scale(1); opacity: .08; }
+            50% { transform: translateY(-14px) scale(1.12); opacity: .2; }
+        }
+        
+        @keyframes particle-pop {
+            0% { transform: translate(0,0) scale(1); opacity: 1; }
+            100% { transform: translate(var(--tx),var(--ty)) scale(0); opacity: 0; }
+        }
+        
+        @keyframes hero-in {
+            0% { opacity: 0; transform: translateY(40px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes hero-in2 {
+            0%, 20% { opacity: 0; transform: translateY(30px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes hero-in3 {
+            0%, 35% { opacity: 0; transform: translateY(24px); }
+            100% { opacity: 1; transform: translateY(0); }
+        }
+        
+        @keyframes ring-pulse {
+            0% { transform: scale(.8); opacity: .5; }
+            50% { transform: scale(1.4); opacity: 0; }
+            100% { transform: scale(.8); opacity: 0; }
+        }
+        
+        @keyframes grad-shift {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
+        }
+        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        
+        body {
+            font-family: "DM Sans", system-ui, sans-serif;
+            min-height: 100vh;
+            background: #fafaf9;
+        }
+        
+        /* Background pattern overlay */
+        body::before {
+            content: "";
+            position: fixed;
+            inset: 0;
+            opacity: .03;
+            background-image: 
+                linear-gradient(#1c1917 1px, transparent 1px),
+                linear-gradient(90deg, #1c1917 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+            z-index: -1;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef, useCallback } = React;
+
+        /* ═══════════════════════════════════════════════════════════════
+           LIVING ORB — Canvas particle field with gentle pulse
+           Matches Magnum Opus AI activity indicator from source
+           ═══════════════════════════════════════════════════════════════ */
+        const LivingOrb = ({ size = 40 }) => {
+            const canvasRef = useRef(null);
+            const particlesRef = useRef([]);
+            const animRef = useRef(null);
+            const initialized = useRef(false);
+
+            useEffect(() => {
+                const canvas = canvasRef.current;
+                if (!canvas || initialized.current) return;
+                initialized.current = true;
+                const ctx = canvas.getContext("2d");
+                const s = size;
+                canvas.width = s * 2;
+                canvas.height = s * 2;
+                ctx.scale(2, 2);
+
+                for (let i = 0; i < 24; i++) {
+                    particlesRef.current.push({
+                        angle: Math.random() * Math.PI * 2,
+                        radius: 3 + Math.random() * (s / 2.4),
+                        speed: 0.004 + Math.random() * 0.01,
+                        size: 0.4 + Math.random() * 1.8,
+                        opacity: 0.15 + Math.random() * 0.85,
+                        phase: Math.random() * Math.PI * 2,
+                    });
+                }
+
+                const animate = (t) => {
+                    ctx.clearRect(0, 0, s, s);
+                    const cx = s / 2, cy = s / 2;
+                    const pulse = 1 + Math.sin(t * 0.0015) * 0.12;
+                    const breathe = 1 + Math.sin(t * 0.0008) * 0.06;
+
+                    const atmo = ctx.createRadialGradient(cx, cy, 0, cx, cy, (s / 2) * breathe);
+                    atmo.addColorStop(0, "rgba(34,197,94,0.18)");
+                    atmo.addColorStop(0.4, "rgba(34,197,94,0.06)");
+                    atmo.addColorStop(1, "rgba(34,197,94,0)");
+                    ctx.fillStyle = atmo;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, (s / 2) * breathe, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const midGlow = ctx.createRadialGradient(cx, cy, 2, cx, cy, 10 * pulse);
+                    midGlow.addColorStop(0, "rgba(74,222,128,0.35)");
+                    midGlow.addColorStop(0.6, "rgba(34,197,94,0.12)");
+                    midGlow.addColorStop(1, "rgba(34,197,94,0)");
+                    ctx.fillStyle = midGlow;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 10 * pulse, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const coreR = 5 * pulse;
+                    const core = ctx.createRadialGradient(cx - 1, cy - 1, 0, cx, cy, coreR);
+                    core.addColorStop(0, "#bbf7d0");
+                    core.addColorStop(0.3, "#4ade80");
+                    core.addColorStop(0.7, "#22c55e");
+                    core.addColorStop(1, "#15803d");
+                    ctx.fillStyle = core;
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    const spec = ctx.createRadialGradient(cx - 1.5, cy - 2, 0, cx, cy, 3);
+                    spec.addColorStop(0, "rgba(255,255,255,0.7)");
+                    spec.addColorStop(1, "rgba(255,255,255,0)");
+                    ctx.fillStyle = spec;
+                    ctx.beginPath();
+                    ctx.arc(cx - 1, cy - 1.5, 2.5, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    particlesRef.current.forEach((p) => {
+                        p.angle += p.speed;
+                        const wobble = Math.sin(t * 0.002 + p.phase) * 1.8;
+                        const px = cx + Math.cos(p.angle) * (p.radius + wobble);
+                        const py = cy + Math.sin(p.angle) * (p.radius + wobble);
+                        const flicker = 0.5 + Math.sin(t * 0.004 + p.phase) * 0.5;
+                        ctx.globalAlpha = p.opacity * flicker;
+                        const pg = ctx.createRadialGradient(px, py, 0, px, py, p.size);
+                        pg.addColorStop(0, "rgba(134,239,172,0.9)");
+                        pg.addColorStop(1, "rgba(34,197,94,0)");
+                        ctx.fillStyle = pg;
+                        ctx.beginPath();
+                        ctx.arc(px, py, p.size * 1.5, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalAlpha = 1;
+                    });
+
+                    animRef.current = requestAnimationFrame(animate);
+                };
+                animRef.current = requestAnimationFrame(animate);
+                return () => cancelAnimationFrame(animRef.current);
+            }, [size]);
+
+            return <canvas ref={canvasRef} style={{ width: size, height: size, display: "block" }} />;
+        };
+
+        /* ═══════════════════════════════════════════════════════════════
+           PARTICLE BURST — Click effect from source NavButton
+           ═══════════════════════════════════════════════════════════════ */
+        const useParticleBurst = () => {
+            return useCallback((e) => {
+                const btn = e.currentTarget;
+                const rect = btn.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                const colors = ["#fff", "#a5f3fc", "#c4b5fd", "#f9a8d4", "#fcd34d", "#86efac"];
+                for (let i = 0; i < 12; i++) {
+                    const sz = 3 + Math.random() * 5;
+                    const p = document.createElement("span");
+                    p.style.cssText = `position:absolute;left:${x}px;top:${y}px;width:${sz}px;height:${sz}px;border-radius:50%;pointer-events:none;z-index:50;background:${colors[Math.floor(Math.random() * colors.length)]};animation:particle-pop .65s cubic-bezier(.23,1,.32,1) forwards;--tx:${(Math.random() - .5) * 90}px;--ty:${(Math.random() - .5) * 90}px;`;
+                    btn.appendChild(p);
+                    setTimeout(() => p.remove(), 700);
+                }
+            }, []);
+        };
+
+        /* ─── Animated counter ─── */
+        const AnimNum = ({ target, suffix = "" }) => {
+            const [val, setVal] = useState(0);
+            const ref = useRef(null);
+            const ran = useRef(false);
+            
+            useEffect(() => {
+                const obs = new IntersectionObserver(([e]) => {
+                    if (e.isIntersecting && !ran.current) {
+                        ran.current = true;
+                        const s = performance.now();
+                        const tick = (n) => {
+                            const p = Math.min((n - s) / 2200, 1);
+                            setVal(Math.floor(target * (1 - Math.pow(1 - p, 3))));
+                            if (p < 1) requestAnimationFrame(tick);
+                        };
+                        requestAnimationFrame(tick);
+                    }
+                }, { threshold: 0.3 });
+                if (ref.current) obs.observe(ref.current);
+                return () => obs.disconnect();
+            }, [target]);
+            
+            return <span ref={ref}>{val.toLocaleString()}{suffix}</span>;
+        };
+
+        /* ─── Scroll-reveal ─── */
+        const Reveal = ({ children, delay = 0, style = {} }) => {
+            const ref = useRef(null);
+            const [vis, setVis] = useState(false);
+            
+            useEffect(() => {
+                const obs = new IntersectionObserver(([e]) => { 
+                    if (e.isIntersecting) setVis(true); 
+                }, { threshold: 0.12 });
+                if (ref.current) obs.observe(ref.current);
+                return () => obs.disconnect();
+            }, []);
+            
+            return (
+                <div ref={ref} style={{ opacity: vis ? 1 : 0, transform: vis ? "translateY(0)" : "translateY(32px)", transition: `all .7s cubic-bezier(.23,1,.32,1) ${delay}ms`, ...style }}>
+                    {children}
+                </div>
+            );
+        };
+
+        /* ─── Nav Button ─── */
+        const NavBtn = ({ children, active, onClick, burst }) => {
+            const [isHovered, setIsHovered] = useState(false);
+            
+            return (
+                <button
+                    onClick={(e) => { burst(e); onClick?.(); }}
+                    style={{
+                        position: "relative", overflow: "visible", padding: "6px 14px", borderRadius: 8,
+                        fontSize: 15, fontWeight: active ? 600 : 500, letterSpacing: ".01em",
+                        color: active ? "#fff" : "rgba(216,200,255,0.85)",
+                        background: active ? "rgba(255,255,255,.18)" : "transparent",
+                        border: active ? "1px solid rgba(255,255,255,.2)" : "1px solid transparent",
+                        backdropFilter: active ? "blur(8px)" : "none",
+                        boxShadow: active ? "0 2px 16px rgba(147,51,234,.18)" : "none",
+                        cursor: "pointer", transition: "all .25s ease",
+                        WebkitTextStroke: "0.3px rgba(0,0,0,0.3)",
+                        textShadow: "0 1px 2px rgba(0,0,0,0.4)",
+                    }}
+                    onMouseEnter={() => setIsHovered(true)}
+                    onMouseLeave={() => setIsHovered(false)}
+                >
+                    {children}
+                </button>
+            );
+        };
+
+        /* ═══════════════════════════════════════════════════════════════
+           MAIN STOREFRONT
+           ═══════════════════════════════════════════════════════════════ */
+        function MagnumOpusStorefront() {
+            const [activeNav, setActiveNav] = useState("features");
+            const [scrollY, setScrollY] = useState(0);
+            const burst = useParticleBurst();
+
+            useEffect(() => {
+                const fn = () => setScrollY(window.scrollY);
+                window.addEventListener("scroll", fn, { passive: true });
+                return () => window.removeEventListener("scroll", fn);
+            }, []);
+
+            const shrink = Math.min(scrollY / 200, 1);
+            const F = "'DM Sans',system-ui,sans-serif";
+            const FD = "'Instrument Serif',Georgia,serif";
+
+            return (
+                <div style={{ fontFamily: F }}>
+                    <style>{`
+                        @keyframes particle-pop{0%{transform:translate(0,0) scale(1);opacity:1}100%{transform:translate(var(--tx),var(--ty)) scale(0);opacity:0}}
+                    `}</style>
+
+                    {/* ══════ NAVBAR — ROYGBIV 180s lazy cycle ══════ */}
+                    <nav className="rainbow-bar" style={{ position: "sticky", top: 0, zIndex: 100, overflow: "hidden", height: `${56 - shrink * 8}px`, transition: "height .3s ease" }}>
+                        <div style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden" }}>
+                            <div style={{ position: "absolute", inset: 0, background: "linear-gradient(90deg,rgba(255,255,255,.04),rgba(255,255,255,.08),rgba(255,255,255,.04))" }} />
+                            <div style={{ position: "absolute", width: 280, height: 140, background: "rgba(255,255,255,.08)", borderRadius: "50%", filter: "blur(30px)", top: -70, left: -60, animation: "float-a 7s ease-in-out infinite" }} />
+                            <div style={{ position: "absolute", width: 200, height: 100, background: "rgba(255,255,255,.06)", borderRadius: "50%", filter: "blur(24px)", top: -50, right: "30%", animation: "float-b 9s ease-in-out infinite", animationDelay: "-3s" }} />
+                            <div style={{ position: "absolute", width: 240, height: 120, background: "rgba(255,255,255,.07)", borderRadius: "50%", filter: "blur(28px)", top: -60, right: -40, animation: "float-c 11s ease-in-out infinite", animationDelay: "-5s" }} />
+                            <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 1, background: "linear-gradient(90deg,transparent,rgba(255,255,255,.15),transparent)" }} />
+                            <div style={{ position: "absolute", bottom: 0, left: 0, right: 0, height: 1, background: "linear-gradient(90deg,transparent,rgba(255,255,255,.25),transparent)" }} />
+                        </div>
+                        <div style={{ position: "relative", maxWidth: 1200, margin: "0 auto", padding: "0 24px", height: "100%", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 24 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                    <LivingOrb size={32} />
+                                    <span style={{ fontSize: 20, fontWeight: 700, letterSpacing: "-.02em", background: "linear-gradient(90deg,#fff,#a5f3fc,#ddd6fe)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text" }}>Magnum Opus</span>
+                                    <span style={{ fontSize: 10, padding: "2px 7px", background: "rgba(6,182,212,.3)", color: "#a5f3fc", borderRadius: 20, fontWeight: 600, letterSpacing: ".08em" }}>AI</span>
+                                </div>
+                                <div style={{ display: "flex", gap: 4 }}>
+                                    {["Features", "How It Works", "Pricing"].map((t) => (
+                                        <NavBtn key={t} active={activeNav === t.toLowerCase().replace(/ /g, "-")} onClick={() => { setActiveNav(t.toLowerCase().replace(/ /g, "-")); document.getElementById(t.toLowerCase().replace(/ /g, "-"))?.scrollIntoView({ behavior: "smooth" }); }} burst={burst}>{t}</NavBtn>
+                                    ))}
+                                </div>
+                            </div>
+                            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                <button style={{ padding: "7px 18px", borderRadius: 8, fontSize: 14, fontWeight: 500, color: "rgba(255,255,255,.9)", background: "transparent", border: "1px solid rgba(255,255,255,.25)", cursor: "pointer", transition: "all .2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "rgba(255,255,255,.1)"} onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>Sign In</button>
+                                <button style={{ padding: "7px 20px", borderRadius: 8, fontSize: 14, fontWeight: 600, color: "#1c1917", background: "#fff", border: "none", cursor: "pointer", boxShadow: "0 2px 8px rgba(0,0,0,.15)", transition: "all .2s" }} onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 4px 16px rgba(0,0,0,.2)"; }} onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 2px 8px rgba(0,0,0,.15)"; }}>Get Started Free</button>
+                            </div>
+                        </div>
+                    </nav>
+
+                    {/* ══════ HERO ══════ */}
+                    <section style={{ position: "relative", overflow: "hidden", padding: "100px 24px 80px", textAlign: "center", background: "linear-gradient(180deg,#fafaf9,#f5f5f4 50%,#fafaf9)" }}>
+                        <div style={{ position: "absolute", inset: 0, opacity: .03, backgroundImage: "linear-gradient(#1c1917 1px,transparent 1px),linear-gradient(90deg,#1c1917 1px,transparent 1px)", backgroundSize: "60px 60px" }} />
+                        <div style={{ position: "absolute", top: "10%", left: "50%", transform: "translateX(-50%)", width: 600, height: 400, borderRadius: "50%", background: "radial-gradient(ellipse,rgba(34,197,94,.06),transparent 70%)", filter: "blur(40px)", pointerEvents: "none" }} />
+                        <div style={{ position: "relative", maxWidth: 800, margin: "0 auto" }}>
+                            <div style={{ display: "flex", justifyContent: "center", marginBottom: 28, animation: "hero-in .8s ease-out both" }}>
+                                <div style={{ position: "relative" }}>
+                                    <LivingOrb size={56} />
+                                    <div style={{ position: "absolute", inset: -8, borderRadius: "50%", border: "1.5px solid rgba(34,197,94,.2)", animation: "ring-pulse 3s ease-in-out infinite" }} />
+                                </div>
+                            </div>
+                            <h1 style={{ fontSize: "clamp(36px,5vw,64px)", fontWeight: 800, lineHeight: 1.1, letterSpacing: "-.03em", marginBottom: 20, animation: "hero-in .8s ease-out both" }}>
+                                <span style={{ background: "linear-gradient(135deg,#1c1917,#22c55e 50%,#06b6d4)", backgroundSize: "200% 200%", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", backgroundClip: "text", animation: "grad-shift 6s ease infinite" }}>Your Story Bible.</span><br />
+                                <span style={{ color: "#1c1917" }}>Your AI Co-Author.</span>
+                            </h1>
+                            <p style={{ fontSize: "clamp(16px,2vw,20px)", lineHeight: 1.6, color: "#57534e", maxWidth: 560, margin: "0 auto 36px", animation: "hero-in2 1s ease-out both" }}>
+                                Magnum Opus learns your characters, your world, your voice — then writes full chapters autonomously while staying true to your story bible.
+                            </p>
+                            <div style={{ display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap", animation: "hero-in3 1.2s ease-out both" }}>
+                                <button style={{ padding: "14px 36px", borderRadius: 12, fontSize: 16, fontWeight: 700, color: "#fff", background: "#1c1917", border: "none", cursor: "pointer", boxShadow: "0 4px 20px rgba(0,0,0,.2)", transition: "all .25s" }} onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 32px rgba(0,0,0,.3)"; }} onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 4px 20px rgba(0,0,0,.2)"; }}>Start Writing Free</button>
+                                <button style={{ padding: "14px 36px", borderRadius: 12, fontSize: 16, fontWeight: 600, color: "#1c1917", background: "transparent", border: "2px solid #d6d3d1", cursor: "pointer", transition: "all .25s" }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = "#22c55e"; e.currentTarget.style.color = "#15803d"; }} onMouseLeave={(e) => { e.currentTarget.style.borderColor = "#d6d3d1"; e.currentTarget.style.color = "#1c1917"; }}>Watch Demo</button>
+                            </div>
+                            <div style={{ marginTop: 48, display: "flex", alignItems: "center", justifyContent: "center", gap: 32, flexWrap: "wrap", animation: "hero-in3 1.4s ease-out both" }}>
+                                {[{ n: 488996, l: "Words Generated" }, { n: 2400, l: "Authors Writing" }, { n: 27, l: "Chapters in One Project" }].map(({ n, l }) => (
+                                    <div key={l} style={{ textAlign: "center" }}>
+                                        <div style={{ fontSize: 28, fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}><AnimNum target={n} suffix="+" /></div>
+                                        <div style={{ fontSize: 13, color: "#78716c", marginTop: 2 }}>{l}</div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </section>
+
+                    {/* ══════ FEATURES ══════ */}
+                    <section id="features" style={{ padding: "80px 24px", maxWidth: 1200, margin: "0 auto" }}>
+                        <div style={{ textAlign: "center", marginBottom: 56 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 8 }}>Features</div>
+                            <h2 style={{ fontSize: "clamp(28px,3.5vw,44px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}>Everything a novelist needs</h2>
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 20 }}>
+                            {[
+                                { icon: "📖", t: "Story Bible", d: "Define characters, world rules, plot threads, and tone. The AI references every detail as it writes — no contradictions, no drift." },
+                                { icon: "🤖", t: "Autonomous Writer", d: "Select chapters, pick plot points, and hit go. Magnum Opus generates full-length chapters that follow your story bible to the letter." },
+                                { icon: "✍️", t: "Style Learning", d: "Paste samples of your writing and the AI analyzes vocabulary, sentence length, dialogue ratio, and tone to replicate your unique voice." },
+                                { icon: "🎭", t: "Character Depth", d: "16+ character profiles with backstories, relationships, speech patterns, and arc tracking woven through every scene." },
+                                { icon: "📊", t: "Metrics Dashboard", d: "Track tokens used, quality scores, success rates, and system health in real-time. Full visibility into your AI writing pipeline." },
+                                { icon: "📄", t: "Print & Export", d: "Export polished manuscripts to PDF with professional formatting — chapters, headers, page numbers, ready for beta readers." },
+                            ].map(({ icon, t, d }, i) => (
+                                <Reveal key={t} delay={i * 90}>
+                                    <div style={{ background: "#fff", borderRadius: 16, padding: "32px 28px", border: "1px solid #e7e5e4", boxShadow: "0 1px 3px rgba(0,0,0,.04),0 8px 24px rgba(0,0,0,.03)", position: "relative", overflow: "hidden", height: "100%" }}>
+                                        <div className="rainbow-bar" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, opacity: .7 }} />
+                                        <div style={{ width: 48, height: 48, borderRadius: 12, background: "linear-gradient(135deg,#f0fdf4,#dcfce7)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 24, marginBottom: 16 }}>{icon}</div>
+                                        <h3 style={{ fontSize: 18, fontWeight: 700, color: "#1c1917", marginBottom: 8 }}>{t}</h3>
+                                        <p style={{ fontSize: 14.5, lineHeight: 1.6, color: "#57534e" }}>{d}</p>
+                                    </div>
+                                </Reveal>
+                            ))}
+                        </div>
+                    </section>
+
+                    {/* ══════ APP PREVIEW ══════ */}
+                    <section style={{ padding: "0 24px 80px", maxWidth: 1000, margin: "0 auto" }}>
+                        <Reveal>
+                            <div style={{ background: "#1c1917", borderRadius: 20, overflow: "hidden", boxShadow: "0 24px 80px rgba(0,0,0,.18)", border: "1px solid #292524" }}>
+                                <div className="rainbow-bar" style={{ height: 4 }} />
+                                <div style={{ display: "flex", alignItems: "center", padding: "10px 16px", gap: 8, background: "#292524" }}>
+                                    <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#ef4444" }} />
+                                    <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#eab308" }} />
+                                    <div style={{ width: 12, height: 12, borderRadius: "50%", background: "#22c55e" }} />
+                                    <span style={{ flex: 1, textAlign: "center", fontSize: 12, color: "#78716c" }}>Magnum Opus — Autonomous Writer</span>
+                                </div>
+                                <div style={{ padding: 32, display: "grid", gridTemplateColumns: "200px 1fr", gap: 24 }}>
+                                    <div>
+                                        <div style={{ fontSize: 11, fontWeight: 600, color: "#78716c", textTransform: "uppercase", letterSpacing: ".08em", marginBottom: 12 }}>Chapters</div>
+                                        {["Ch 1: The Listing", "Ch 2: The Showing", "Ch 3: The Offer", "Ch 4: Open House", "Ch 5: Escrow"].map((c, i) => (
+                                            <div key={c} style={{ padding: "8px 12px", borderRadius: 8, fontSize: 13, color: i === 0 ? "#fff" : "#a8a29e", background: i === 0 ? "rgba(34,197,94,.15)" : "transparent", border: i === 0 ? "1px solid rgba(34,197,94,.3)" : "1px solid transparent", marginBottom: 4, cursor: "pointer" }}>{c}</div>
+                                        ))}
+                                    </div>
+                                    <div>
+                                        <div style={{ display: "flex", gap: 12, marginBottom: 20 }}>
+                                            <div style={{ padding: "6px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#fff", background: "#22c55e" }}>Write Chapter</div>
+                                            <div style={{ padding: "6px 16px", borderRadius: 8, fontSize: 13, fontWeight: 600, color: "#22c55e", background: "rgba(34,197,94,.1)", border: "1px solid rgba(34,197,94,.3)" }}>Write Full Book</div>
+                                        </div>
+                                        <div style={{ fontSize: 12, color: "#a8a29e", marginBottom: 8 }}>Target Words</div>
+                                        <div style={{ height: 6, background: "#292524", borderRadius: 3, marginBottom: 4, position: "relative" }}>
+                                            <div style={{ width: "60%", height: "100%", background: "linear-gradient(90deg,#22c55e,#06b6d4)", borderRadius: 3 }} />
+                                        </div>
+                                        <div style={{ fontSize: 12, color: "#78716c", marginBottom: 20 }}>5,000 words</div>
+                                        <div style={{ fontSize: 12, color: "#a8a29e", marginBottom: 8 }}>Characters Available</div>
+                                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                            {["Mary VanAllen", "BB DePlume", "Victoria Sanchez", "Lindsey Lee Foster"].map((ch) => (
+                                                <span key={ch} style={{ padding: "4px 10px", borderRadius: 6, fontSize: 11, color: "#a8a29e", background: "#292524", border: "1px solid #44403c" }}>{ch}</span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </Reveal>
+                    </section>
+
+                    {/* ══════ HOW IT WORKS ══════ */}
+                    <section id="how-it-works" style={{ padding: "80px 24px", background: "#f5f5f4" }}>
+                        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+                            <div style={{ textAlign: "center", marginBottom: 56 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 8 }}>How It Works</div>
+                                <h2 style={{ fontSize: "clamp(28px,3.5vw,44px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}>Three steps to your novel</h2>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(300px,1fr))", gap: 32 }}>
+                                {[
+                                    { s: "01", t: "Build Your Bible", d: "Define your premise, characters, world, plot structure, and style guide. Import existing work or start fresh — the AI extracts structure from your writing." },
+                                    { s: "02", t: "Configure & Generate", d: "Choose act, select plot points, set chapter targets up to 5,000 words each. Hit 'Write Full Book' and Magnum Opus autonomously generates every chapter." },
+                                    { s: "03", t: "Review & Export", d: "Edit in the built-in rich text editor. Check quality scores on the metrics dashboard. Export polished manuscripts to PDF when you're ready." },
+                                ].map(({ s, t, d }, i) => (
+                                    <Reveal key={s} delay={i * 120}>
+                                        <div style={{ display: "flex", gap: 20, alignItems: "flex-start" }}>
+                                            <div style={{ minWidth: 48, height: 48, borderRadius: 12, background: "linear-gradient(135deg,#22c55e,#06b6d4)", display: "flex", alignItems: "center", justifyContent: "center", color: "#fff", fontSize: 16, fontWeight: 800, boxShadow: "0 4px 12px rgba(34,197,94,.3)" }}>{s}</div>
+                                            <div>
+                                                <h3 style={{ fontSize: 20, fontWeight: 700, color: "#1c1917", marginBottom: 6 }}>{t}</h3>
+                                                <p style={{ fontSize: 15, lineHeight: 1.6, color: "#57534e" }}>{d}</p>
+                                            </div>
+                                        </div>
+                                    </Reveal>
+                                ))}
+                            </div>
+                        </div>
+                    </section>
+
+                    {/* ══════ STYLE FINGERPRINT ══════ */}
+                    <section style={{ padding: "80px 24px", maxWidth: 1000, margin: "0 auto" }}>
+                        <div style={{ textAlign: "center", marginBottom: 48 }}>
+                            <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 8 }}>Style Intelligence</div>
+                            <h2 style={{ fontSize: "clamp(28px,3.5vw,44px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}>Your voice, fingerprinted</h2>
+                            <p style={{ fontSize: 16, color: "#57534e", marginTop: 12, maxWidth: 500, margin: "12px auto 0" }}>Paste your writing and the AI decodes every dimension of your style.</p>
+                        </div>
+                        <Reveal>
+                            <div style={{ background: "#fff", borderRadius: 20, padding: 36, border: "1px solid #e7e5e4", boxShadow: "0 4px 32px rgba(0,0,0,.05)" }}>
+                                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 24 }}>
+                                    {[
+                                        { label: "Vocabulary Complexity", value: 43, desc: "Sophisticated" },
+                                        { label: "Sentence Length", value: 62, desc: "~10 words, Long" },
+                                        { label: "Dialogue Ratio", value: 13, desc: "Low-High" },
+                                        { label: "Show vs Tell", value: 54, desc: "Telling → Showing" },
+                                        { label: "Metaphor Usage", value: 26, desc: "Sparse → Rich" },
+                                    ].map(({ label, value, desc }) => (
+                                        <div key={label}>
+                                            <div style={{ fontSize: 13, fontWeight: 600, color: "#44403c", marginBottom: 6 }}>{label}</div>
+                                            <div style={{ height: 8, background: "#f5f5f4", borderRadius: 4, overflow: "hidden", marginBottom: 4 }}>
+                                                <div style={{ width: `${value}%`, height: "100%", background: "linear-gradient(90deg,#22c55e,#06b6d4)", borderRadius: 4, transition: "width 1s ease" }} />
+                                            </div>
+                                            <div style={{ fontSize: 12, color: "#78716c" }}>{value}% — {desc}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div style={{ marginTop: 28, padding: 20, background: "#f5f5f4", borderRadius: 12 }}>
+                                    <div style={{ fontSize: 13, fontWeight: 600, color: "#44403c", marginBottom: 6 }}>Tone Profile</div>
+                                    <p style={{ fontSize: 14, lineHeight: 1.6, color: "#57534e", fontStyle: "italic" }}>
+                                        "Conversational and wry with an intimate, confiding narrator. Suburban noir undertones — satirical but empathetic. Uses domestic details as metaphors for larger anxieties."
+                                    </p>
+                                </div>
+                            </div>
+                        </Reveal>
+                    </section>
+
+                    {/* ══════ TESTIMONIALS ══════ */}
+                    <section style={{ padding: "80px 24px", background: "#f5f5f4" }}>
+                        <div style={{ maxWidth: 1200, margin: "0 auto" }}>
+                            <div style={{ textAlign: "center", marginBottom: 48 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 8 }}>Writers Love It</div>
+                                <h2 style={{ fontSize: "clamp(28px,3.5vw,44px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}>From first draft to finished novel</h2>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 20 }}>
+                                {[
+                                    { q: "I generated 488,000 words across 27 chapters with full story bible consistency. The characters never broke voice once.", a: "Thriller Author", r: "27-chapter novel completed" },
+                                    { q: "The style learning picked up my suburban noir tone perfectly — wry, intimate, quietly brutal. It felt like reading my own writing.", a: "Domestic Fiction Writer", r: "7 samples analyzed" },
+                                    { q: "Being able to set 5,000 words per chapter and let it run autonomously changed my entire workflow. I write 10x faster now.", a: "Science Fiction Author", r: "Multiple projects running" },
+                                ].map(({ q, a, r }, i) => (
+                                    <Reveal key={a} delay={i * 120}>
+                                        <div style={{ background: "#fafaf9", borderRadius: 16, padding: "28px 24px", border: "1px solid #e7e5e4", height: "100%" }}>
+                                            <div style={{ fontSize: 28, color: "#22c55e", marginBottom: 12, fontFamily: FD }}>"</div>
+                                            <p style={{ fontSize: 15, lineHeight: 1.65, color: "#44403c", fontStyle: "italic", marginBottom: 16 }}>{q}</p>
+                                            <div style={{ fontSize: 14, fontWeight: 600, color: "#1c1917" }}>{a}</div>
+                                            <div style={{ fontSize: 13, color: "#78716c" }}>{r}</div>
+                                        </div>
+                                    </Reveal>
+                                ))}
+                            </div>
+                        </div>
+                    </section>
+
+                    {/* ══════ PRICING ══════ */}
+                    <section id="pricing" style={{ padding: "80px 24px" }}>
+                        <div style={{ maxWidth: 900, margin: "0 auto" }}>
+                            <div style={{ textAlign: "center", marginBottom: 48 }}>
+                                <div style={{ fontSize: 13, fontWeight: 600, color: "#22c55e", textTransform: "uppercase", letterSpacing: ".1em", marginBottom: 8 }}>Pricing</div>
+                                <h2 style={{ fontSize: "clamp(28px,3.5vw,44px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em" }}>BYOK — Bring Your Own Key</h2>
+                                <p style={{ fontSize: 16, color: "#57534e", marginTop: 12, maxWidth: 500, margin: "12px auto 0" }}>Magnum Opus is self-hosted. You bring your own AI provider key. No subscriptions, no per-word fees.</p>
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(280px,1fr))", gap: 24 }}>
+                                <Reveal delay={0}>
+                                    <div style={{ background: "#fff", borderRadius: 20, padding: 32, border: "1px solid #e7e5e4", boxShadow: "0 2px 8px rgba(0,0,0,.04)" }}>
+                                        <div style={{ fontSize: 14, fontWeight: 600, color: "#22c55e", marginBottom: 4 }}>Open Source</div>
+                                        <div style={{ fontSize: 40, fontWeight: 800, color: "#1c1917", marginBottom: 4 }}>Free</div>
+                                        <div style={{ fontSize: 14, color: "#78716c", marginBottom: 24 }}>Forever. Self-hosted.</div>
+                                        {["Unlimited projects", "Full story bible", "Autonomous writing", "Style learning", "PDF export", "All AI providers"].map((f) => (
+                                            <div key={f} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                                                <span style={{ color: "#22c55e", fontSize: 16 }}>✓</span>
+                                                <span style={{ fontSize: 14, color: "#44403c" }}>{f}</span>
+                                            </div>
+                                        ))}
+                                        <button style={{ width: "100%", marginTop: 20, padding: "12px 0", borderRadius: 10, fontSize: 15, fontWeight: 700, color: "#fff", background: "#1c1917", border: "none", cursor: "pointer", transition: "all .2s" }} onMouseEnter={(e) => e.currentTarget.style.background = "#292524"} onMouseLeave={(e) => e.currentTarget.style.background = "#1c1917"}>Clone Repository</button>
+                                    </div>
+                                </Reveal>
+                                <Reveal delay={120}>
+                                    <div style={{ background: "#fff", borderRadius: 20, padding: 32, border: "2px solid #22c55e", boxShadow: "0 4px 24px rgba(34,197,94,.12)", position: "relative", overflow: "hidden" }}>
+                                        <div className="rainbow-bar" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 4 }} />
+                                        <div style={{ fontSize: 14, fontWeight: 600, color: "#22c55e", marginBottom: 4 }}>Cloud Hosted</div>
+                                        <div style={{ display: "flex", alignItems: "baseline", gap: 4, marginBottom: 4 }}>
+                                            <span style={{ fontSize: 40, fontWeight: 800, color: "#1c1917" }}>$19</span>
+                                            <span style={{ fontSize: 14, color: "#78716c" }}>/month</span>
+                                        </div>
+                                        <div style={{ fontSize: 14, color: "#78716c", marginBottom: 24 }}>We host, you write.</div>
+                                        {["Everything in Free", "Cloud-hosted — no setup", "Automatic updates", "Priority support", "Team collaboration", "Advanced analytics"].map((f) => (
+                                            <div key={f} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                                                <span style={{ color: "#22c55e", fontSize: 16 }}>✓</span>
+                                                <span style={{ fontSize: 14, color: "#44403c" }}>{f}</span>
+                                            </div>
+                                        ))}
+                                        <button style={{ width: "100%", marginTop: 20, padding: "12px 0", borderRadius: 10, fontSize: 15, fontWeight: 700, color: "#fff", background: "linear-gradient(135deg,#22c55e,#16a34a)", border: "none", cursor: "pointer", boxShadow: "0 2px 12px rgba(34,197,94,.3)", transition: "all .2s" }} onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-1px)"; e.currentTarget.style.boxShadow = "0 4px 20px rgba(34,197,94,.4)"; }} onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 2px 12px rgba(34,197,94,.3)"; }}>Start Free Trial</button>
+                                    </div>
+                                </Reveal>
+                            </div>
+                        </div>
+                    </section>
+
+                    {/* ══════ FINAL CTA ══════ */}
+                    <section style={{ position: "relative", overflow: "hidden", padding: "80px 24px", textAlign: "center" }}>
+                        <div style={{ position: "relative", maxWidth: 600, margin: "0 auto" }}>
+                            <div style={{ display: "flex", justifyContent: "center", marginBottom: 24 }}><LivingOrb size={48} /></div>
+                            <h2 style={{ fontSize: "clamp(28px,4vw,48px)", fontWeight: 800, color: "#1c1917", letterSpacing: "-.02em", marginBottom: 16 }}>Your novel is waiting</h2>
+                            <p style={{ fontSize: 17, lineHeight: 1.6, color: "#57534e", marginBottom: 32 }}>Build your story bible, configure your chapters, and let the AI write with your voice.</p>
+                            <button style={{ padding: "16px 44px", borderRadius: 14, fontSize: 17, fontWeight: 700, color: "#fff", background: "#1c1917", border: "none", cursor: "pointer", boxShadow: "0 4px 24px rgba(0,0,0,.2)", transition: "all .25s" }} onMouseEnter={(e) => { e.currentTarget.style.transform = "translateY(-2px)"; e.currentTarget.style.boxShadow = "0 8px 36px rgba(0,0,0,.3)"; }} onMouseLeave={(e) => { e.currentTarget.style.transform = "translateY(0)"; e.currentTarget.style.boxShadow = "0 4px 24px rgba(0,0,0,.2)"; }}>Get Started — It's Free</button>
+                        </div>
+                    </section>
+
+                    {/* ══════ FOOTER ══════ */}
+                    <footer style={{ borderTop: "1px solid #e7e5e4", padding: "40px 24px", background: "#fafaf9" }}>
+                        <div style={{ maxWidth: 1200, margin: "0 auto", display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16 }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <LivingOrb size={24} />
+                                <span style={{ fontSize: 16, fontWeight: 700, color: "#1c1917" }}>Magnum Opus</span>
+                                <span style={{ fontSize: 10, padding: "1px 6px", background: "#dcfce7", color: "#15803d", borderRadius: 10, fontWeight: 600 }}>AI</span>
+                            </div>
+                            <div style={{ fontSize: 13, color: "#a8a29e" }}>© 2026 Magnum Opus. Built for novelists, by novelists.</div>
+                            <div style={{ display: "flex", gap: 20 }}>
+                                {["GitHub", "Docs", "Discord"].map((l) => (
+                                    <a key={l} href="#" style={{ fontSize: 13, color: "#78716c", textDecoration: "none", transition: "color .2s" }} onMouseEnter={(e) => e.currentTarget.style.color = "#22c55e"} onMouseLeave={(e) => e.currentTarget.style.color = "#78716c"}>{l}</a>
+                                ))}
+                            </div>
+                        </div>
+                    </footer>
+                </div>
+            );
+        }
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<MagnumOpusStorefront />);
+    </script>
+</body>
+</html>

@@ -1,0 +1,1703 @@
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  useMemo,
+  type JSX,
+} from "react";
+import { api } from "../api/client";
+import type {
+  AutonomousSession,
+  BookProgress,
+  Chapter,
+  NarrativeState,
+  Project,
+} from "../types/magnumOpus";
+
+// Utility function for consistent word counting
+const countWords = (text: string): number =>
+  text.split(/\s+/).filter(Boolean).length;
+
+interface AutonomousWriterProps {
+  project: Project;
+  chapters: Chapter[];
+  onChapterUpdate: (chapterId: string, updates: Partial<Chapter>) => void;
+  onRefreshProject: () => Promise<void>;
+  onWordsGenerated: (newTotal: number) => void;
+}
+
+export function AutonomousWriter({
+  project,
+  chapters,
+  onChapterUpdate,
+  onRefreshProject,
+  onWordsGenerated,
+}: AutonomousWriterProps): JSX.Element {
+  const [session, setSession] = useState<AutonomousSession | null>(null);
+  const [selectedChapterId, setSelectedChapterId] = useState<string | null>(
+    chapters[0]?.id || null,
+  );
+  const [targetWords, setTargetWords] = useState(5000);
+  const [selectedPlotPoints, setSelectedPlotPoints] = useState<string[]>([]);
+  const [isStarting, setIsStarting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [log, setLog] = useState<string[]>([]);
+  const [autoIterate, setAutoIterate] = useState(true);
+  const [generatedContent, setGeneratedContent] = useState<string>("");
+  const [narrativeState, setNarrativeState] = useState<NarrativeState | null>(
+    null,
+  );
+  const [bookProgress, setBookProgress] = useState<BookProgress | null>(null);
+  const [mode, setMode] = useState<"chapter" | "book">("chapter");
+  const [selectedChapters, setSelectedChapters] = useState<string[]>([]);
+  const [wordsPerChapter, setWordsPerChapter] = useState(5000);
+  const [pendingContent, setPendingContent] = useState<string | null>(null);
+  const [autoAccept, setAutoAccept] = useState(true);
+  const [selectedThreads, setSelectedThreads] = useState<string[]>([]);
+  const [isPausing, setIsPausing] = useState(false);
+  const [isResuming, setIsResuming] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
+  const [targetWordsDisplay, setTargetWordsDisplay] = useState(5000);
+  const [wordsPerChapterDisplay, setWordsPerChapterDisplay] = useState(5000);
+  const pollRef = useRef<NodeJS.Timeout | null>(null);
+  const sliderDebounceRef = useRef<NodeJS.Timeout | null>(null);
+  const retryCountRef = useRef<number>(0);
+  const syncedSessionSettingsRef = useRef<{
+    sessionId: string | null;
+    autoIterate: boolean;
+    autoAccept: boolean;
+  }>({
+    sessionId: null,
+    autoIterate: true,
+    autoAccept: true,
+  });
+  const lastPendingDraftRef = useRef<string | null>(null);
+  const lastCommittedAtRef = useRef<string | null>(null);
+  const lastPauseReasonRef = useRef<string | null>(null);
+  const latestSessionRef = useRef<AutonomousSession | null>(null);
+  const MAX_RETRIES = 3;
+
+  const addLog = useCallback((message: string) => {
+    const time = new Date().toLocaleTimeString();
+    setLog((prev) => [...prev, `[${time}] ${message}`]);
+  }, []);
+
+  const applySessionSnapshot = useCallback(
+    (
+      nextSession: AutonomousSession,
+      options?: { logPendingRestore?: boolean; logCommittedRestore?: boolean },
+    ) => {
+      latestSessionRef.current = nextSession;
+      setSession(nextSession);
+      setMode(nextSession.mode);
+      setSelectedThreads(nextSession.selectedThreads || []);
+      setSelectedChapters(nextSession.chaptersToWrite || []);
+      setSelectedChapterId(nextSession.chapterId);
+      setBookProgress(
+        nextSession.mode === "book"
+          ? {
+              currentChapter: nextSession.currentChapterIndex + 1,
+              totalChapters: nextSession.chaptersToWrite.length,
+              chaptersCompleted: nextSession.chaptersCompleted.length,
+              totalBookWords: nextSession.totalBookWords,
+            }
+          : null,
+      );
+
+      syncedSessionSettingsRef.current = {
+        sessionId: nextSession.id,
+        autoIterate: nextSession.autoIterate,
+        autoAccept: nextSession.autoAccept,
+      };
+      setAutoIterate(nextSession.autoIterate);
+      setAutoAccept(nextSession.autoAccept);
+
+      if (
+        nextSession.lastCommittedAt &&
+        nextSession.lastCommittedContent &&
+        lastCommittedAtRef.current !== nextSession.lastCommittedAt
+      ) {
+        setGeneratedContent(nextSession.lastCommittedContent);
+        if (options?.logCommittedRestore) {
+          const committedWords =
+            nextSession.lastCommittedWords ||
+            countWords(nextSession.lastCommittedContent);
+          addLog(`Saved +${committedWords} words to the project`);
+        }
+        lastCommittedAtRef.current = nextSession.lastCommittedAt;
+      }
+
+      if (nextSession.pendingDraft) {
+        setPendingContent(nextSession.pendingDraft);
+        if (
+          options?.logPendingRestore &&
+          lastPendingDraftRef.current !== nextSession.pendingDraft
+        ) {
+          const pendingWords =
+            nextSession.pendingDraftWords ||
+            countWords(nextSession.pendingDraft);
+          addLog(
+            `Unsaved draft restored for review (${pendingWords} words). Background writing is paused until you accept or reject it.`,
+          );
+        }
+        lastPendingDraftRef.current = nextSession.pendingDraft;
+      } else {
+        setPendingContent(null);
+        lastPendingDraftRef.current = null;
+      }
+
+      if (nextSession.pauseReason) {
+        if (lastPauseReasonRef.current !== nextSession.pauseReason) {
+          addLog(nextSession.pauseReason);
+        }
+        lastPauseReasonRef.current = nextSession.pauseReason;
+      } else {
+        lastPauseReasonRef.current = null;
+      }
+    },
+    [addLog],
+  );
+
+  // Check for existing active session on mount (allows navigating away and back)
+  useEffect(() => {
+    const checkForActiveSession = async (): Promise<void> => {
+      try {
+        const activeSessions = await api.autonomous.list();
+        const activeSession = activeSessions.find(
+          (sessionItem) => sessionItem.projectId === project.id,
+        );
+        if (activeSession) {
+          const fullSession = await api.autonomous.get(activeSession.id);
+          applySessionSnapshot(fullSession, {
+            logPendingRestore: !!fullSession.pendingDraft,
+            logCommittedRestore: false,
+          });
+          addLog(`[Reconnected] Found active session: ${fullSession.status}`);
+        }
+      } catch (e) {
+        console.error("Failed to check for active sessions:", e);
+      }
+    };
+    checkForActiveSession();
+  }, [addLog, applySessionSnapshot, project.id]);
+
+  // Sync display values when actual values change
+  useEffect(() => {
+    setTargetWordsDisplay(targetWords);
+  }, [targetWords]);
+
+  useEffect(() => {
+    setWordsPerChapterDisplay(wordsPerChapter);
+  }, [wordsPerChapter]);
+
+  // Debounced slider handlers
+  const handleTargetWordsChange = useCallback((value: number) => {
+    setTargetWordsDisplay(value);
+    if (sliderDebounceRef.current) clearTimeout(sliderDebounceRef.current);
+    sliderDebounceRef.current = setTimeout(() => setTargetWords(value), 150);
+  }, []);
+
+  const handleWordsPerChapterChange = useCallback((value: number) => {
+    setWordsPerChapterDisplay(value);
+    if (sliderDebounceRef.current) clearTimeout(sliderDebounceRef.current);
+    sliderDebounceRef.current = setTimeout(
+      () => setWordsPerChapter(value),
+      150,
+    );
+  }, []);
+  const logEndRef = useRef<HTMLDivElement>(null);
+  const contentEndRef = useRef<HTMLDivElement>(null);
+
+  const storyBible = project.storyBible;
+  const selectedChapter = useMemo(
+    () => chapters.find((c) => c.id === selectedChapterId),
+    [chapters, selectedChapterId],
+  );
+
+  // Parse actual chapter number from title with improved matching
+  // Handles: "Chapter 5", "Ch. 5", "Chapter Five", "5. Title", "Part 2: Chapter 1"
+  const parseChapterNumber = (title: string): number => {
+    // First try to match "Chapter X" or "Ch. X" pattern
+    const chapterMatch = title.match(/(?:chapter|ch\.?)\s*(\d+)/i);
+    if (chapterMatch) return parseInt(chapterMatch[1], 10);
+
+    // Then try leading number like "5. The Beginning"
+    const leadingMatch = title.match(/^(\d+)\./);
+    if (leadingMatch) return parseInt(leadingMatch[1], 10);
+
+    // Fall back to first number found
+    const anyMatch = title.match(/(\d+)/);
+    return anyMatch ? parseInt(anyMatch[1], 10) : 1;
+  };
+
+  const currentChapterNumber = useMemo(
+    () => (selectedChapter ? parseChapterNumber(selectedChapter.title) : 1),
+    [selectedChapter],
+  );
+
+  // Get chapter outline for current chapter (chapter-specific beats)
+  const currentChapterOutline = useMemo(
+    () =>
+      storyBible?.chapterOutlines?.find(
+        (co) => co.chapterNumber === currentChapterNumber,
+      ),
+    [storyBible?.chapterOutlines, currentChapterNumber],
+  );
+
+  // Auto-sync act to chapter when chapter changes and clear plot points
+  useEffect(() => {
+    setSelectedPlotPoints([]);
+  }, [currentChapterNumber]);
+
+  // Auto-scroll log and content
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [log]);
+
+  useEffect(() => {
+    contentEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [generatedContent]);
+
+  // Poll active session so background writing survives navigation away from this page
+  useEffect(() => {
+    if (
+      !session ||
+      session.status === "completed" ||
+      session.status === "stopped"
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const pollSession = async (): Promise<void> => {
+      try {
+        const latest = await api.autonomous.get(session.id);
+        if (!cancelled) {
+          const previous = latestSessionRef.current;
+          applySessionSnapshot(latest, {
+            logPendingRestore:
+              !!latest.pendingDraft &&
+              lastPendingDraftRef.current !== latest.pendingDraft,
+            logCommittedRestore:
+              !!latest.lastCommittedAt &&
+              lastCommittedAtRef.current !== latest.lastCommittedAt,
+          });
+          if (
+            previous &&
+            !latest.pendingDraft &&
+            (latest.generatedWords !== previous.generatedWords ||
+              latest.totalBookWords !== previous.totalBookWords ||
+              latest.chapterId !== previous.chapterId ||
+              latest.chaptersCompleted.length !==
+                previous.chaptersCompleted.length ||
+              latest.status !== previous.status)
+          ) {
+            void onRefreshProject();
+          }
+        }
+      } catch (e) {
+        if (!cancelled) {
+          console.error("Failed to poll autonomous session:", e);
+        }
+      } finally {
+        if (!cancelled) {
+          pollRef.current = setTimeout(() => {
+            void pollSession();
+          }, 2000);
+        }
+      }
+    };
+
+    pollRef.current = setTimeout(() => {
+      void pollSession();
+    }, 2000);
+
+    return (): void => {
+      cancelled = true;
+      if (pollRef.current) {
+        clearTimeout(pollRef.current);
+      }
+    };
+  }, [applySessionSnapshot, onRefreshProject, session?.id, session?.status]);
+
+  useEffect(() => {
+    if (
+      !session ||
+      session.status === "completed" ||
+      session.status === "stopped"
+    ) {
+      return;
+    }
+
+    const synced = syncedSessionSettingsRef.current;
+    if (
+      synced.sessionId === session.id &&
+      synced.autoIterate === autoIterate &&
+      synced.autoAccept === autoAccept
+    ) {
+      return;
+    }
+
+    let cancelled = false;
+
+    api.autonomous
+      .updateSettings(session.id, { autoIterate, autoAccept })
+      .then((updated) => {
+        if (!cancelled) {
+          applySessionSnapshot(updated);
+        }
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          const message =
+            e instanceof Error
+              ? e.message
+              : "Failed to update autonomous settings";
+          setError(message);
+          addLog(`Error: ${message}`);
+        }
+      });
+
+    return (): void => {
+      cancelled = true;
+    };
+  }, [addLog, applySessionSnapshot, autoAccept, autoIterate, session]);
+
+  const togglePlotPoint = useCallback((point: string) => {
+    setSelectedPlotPoints((prev) =>
+      prev.includes(point) ? prev.filter((p) => p !== point) : [...prev, point],
+    );
+  }, []);
+
+  const toggleThread = useCallback((threadId: string) => {
+    setSelectedThreads((prev) =>
+      prev.includes(threadId)
+        ? prev.filter((id) => id !== threadId)
+        : [...prev, threadId],
+    );
+  }, []);
+
+  const toggleChapterSelection = useCallback((chapterId: string) => {
+    setSelectedChapters((prev) =>
+      prev.includes(chapterId)
+        ? prev.filter((id) => id !== chapterId)
+        : [...prev, chapterId],
+    );
+  }, []);
+
+  const selectAllChapters = useCallback(() => {
+    setSelectedChapters(chapters.map((c) => c.id));
+  }, [chapters]);
+
+  // Switch to book mode - creates chapters if needed, selects everything
+  const switchToBookMode = useCallback(async () => {
+    setMode("book");
+
+    // Prepare chapters if we don't have enough
+    if (chapters.length < 2) {
+      try {
+        const data = await api.projects.prepareBookMode(project.id, {});
+        if (data.chapters && data.chapters.length > chapters.length) {
+          window.location.reload();
+          return;
+        }
+      } catch (e) {
+        console.error("Failed to prepare book mode:", e);
+      }
+    }
+
+    // Auto-select ALL chapters
+    setSelectedChapters(chapters.map((c) => c.id));
+
+    // Auto-select chapter beats across the selected book plan
+    if (storyBible) {
+      const allPlotPoints = Array.from(
+        new Set(
+          (storyBible.chapterOutlines || [])
+            .flatMap((co) => co.beats || [])
+            .map((beat) => beat.trim())
+            .filter(Boolean),
+        ),
+      );
+      setSelectedPlotPoints(allPlotPoints);
+
+      // Auto-select ALL plot threads
+      if (storyBible.plotStructure?.plotThreads) {
+        setSelectedThreads(
+          storyBible.plotStructure.plotThreads.map((t) => t.id),
+        );
+      }
+    }
+  }, [project.id, chapters, storyBible]);
+
+  const startSession = async (): Promise<void> => {
+    if (mode === "chapter" && !selectedChapterId) {
+      setError("Please select a chapter to write");
+      return;
+    }
+    if (mode === "book" && selectedChapters.length === 0) {
+      setError("Please select at least one chapter for book mode");
+      return;
+    }
+
+    setIsStarting(true);
+    setError(null);
+    setLog([]);
+    setGeneratedContent("");
+    setNarrativeState(null);
+    setBookProgress(null);
+    setPendingContent(null);
+    lastPendingDraftRef.current = null;
+    lastCommittedAtRef.current = null;
+
+    try {
+      const fallbackChapterBeats =
+        mode === "book"
+          ? Array.from(
+              new Set(
+                (storyBible?.chapterOutlines || [])
+                  .filter((outline) =>
+                    selectedChapters.includes(
+                      chapters.find(
+                        (ch) =>
+                          parseChapterNumber(ch.title) ===
+                          outline.chapterNumber,
+                      )?.id || "",
+                    ),
+                  )
+                  .flatMap((outline) => outline.beats || [])
+                  .map((beat) => beat.trim())
+                  .filter(Boolean),
+              ),
+            )
+          : (currentChapterOutline?.beats || [])
+              .map((beat) => beat.trim())
+              .filter(Boolean);
+
+      const plotPointsToHit =
+        selectedPlotPoints.length > 0
+          ? selectedPlotPoints
+          : fallbackChapterBeats;
+
+      const newSession = await api.autonomous.start({
+        projectId: project.id,
+        chapterId: mode === "chapter" ? selectedChapterId : selectedChapters[0],
+        targetWords: mode === "chapter" ? targetWords : wordsPerChapter,
+        plotPointsToHit,
+        selectedThreads,
+        goal: buildWritingGoal(),
+        mode,
+        chaptersToWrite: mode === "book" ? selectedChapters : [],
+        wordsPerChapter,
+        autoIterate,
+        autoAccept,
+      });
+      applySessionSnapshot(newSession);
+
+      if (mode === "book") {
+        addLog(
+          `Started BOOK MODE - Writing ${selectedChapters.length} chapters`,
+        );
+        addLog(`Target: ${wordsPerChapter.toLocaleString()} words per chapter`);
+        addLog(
+          `Total target: ${(wordsPerChapter * selectedChapters.length).toLocaleString()} words`,
+        );
+      } else {
+        addLog(
+          `Started chapter session: ${selectedChapter?.title || "Untitled"}`,
+        );
+        addLog(`Target: ${targetWords.toLocaleString()} words`);
+      }
+
+      if (plotPointsToHit.length > 0) {
+        addLog(`Chapter beats queued: ${plotPointsToHit.length}`);
+      }
+
+      if (newSession.status === "running" && autoAccept) {
+        addLog(
+          "Background writing is active. You can navigate away and come back later.",
+        );
+      } else if (newSession.status === "running") {
+        addLog(
+          "Background mode will pause after each draft for review until you accept or reject it.",
+        );
+      } else {
+        addLog(
+          "Session started paused. Use Resume or Single Step when you are ready.",
+        );
+      }
+    } catch (e) {
+      const errorMessage =
+        e instanceof Error ? e.message : "Failed to start session";
+      setError(errorMessage);
+      addLog(`Error: ${errorMessage}`);
+    } finally {
+      setIsStarting(false);
+    }
+  };
+
+  const buildWritingGoal = useCallback((): string => {
+    const parts: string[] = [];
+
+    if (storyBible) {
+      if (storyBible.premise?.logline) {
+        parts.push(`Story: ${storyBible.premise.logline}`);
+      }
+      if (storyBible.premise?.tone) {
+        parts.push(`Maintain ${storyBible.premise.tone} tone`);
+      }
+      if (mode === "chapter" && currentChapterOutline?.title) {
+        parts.push(`Current chapter: ${currentChapterOutline.title}`);
+      }
+      if (mode === "chapter" && currentChapterOutline?.summary) {
+        parts.push(`Chapter focus: ${currentChapterOutline.summary}`);
+      }
+      if (storyBible.styleDirectives) {
+        parts.push(
+          `Write in ${storyBible.styleDirectives.pov} POV, ${storyBible.styleDirectives.tense} tense`,
+        );
+      }
+    }
+
+    if (mode === "chapter" && selectedPlotPoints.length > 0) {
+      parts.push(
+        `Plot points to incorporate: ${selectedPlotPoints.join("; ")}`,
+      );
+    } else if (mode === "book") {
+      parts.push(
+        "Advance only the active chapter in sequence. Do not jump ahead to later chapters, future reveals, or outline-style headings.",
+      );
+    }
+
+    return parts.join(". ");
+  }, [storyBible, currentChapterOutline, mode, selectedPlotPoints]);
+
+  const iterate = async (): Promise<void> => {
+    if (
+      !session ||
+      session.status === "completed" ||
+      session.status === "stopped"
+    )
+      return;
+
+    // Don't iterate if there's pending content waiting for approval
+    if (pendingContent && !autoAccept) {
+      addLog("Waiting for approval of pending content...");
+      return;
+    }
+
+    try {
+      const result = await api.autonomous.iteratePreview(session.id);
+
+      // Update narrative state display
+      if (result.narrativeState) {
+        setNarrativeState(result.narrativeState);
+      }
+
+      applySessionSnapshot(result.session);
+
+      const currentChapter = chapters.find(
+        (c) => c.id === result.session.chapterId,
+      );
+      const chapterName = currentChapter?.title || "Chapter";
+
+      if (result.bookProgress) {
+        addLog(
+          `Generated +${result.newWords} words [${chapterName}] - awaiting approval`,
+        );
+      } else {
+        addLog(`Generated +${result.newWords} words - awaiting approval`);
+      }
+
+      if (result.plotPointHit) {
+        addLog(`Plot point addressed: "${result.plotPointHit}"`);
+      }
+
+      // Reset retry count on success
+      retryCountRef.current = 0;
+
+      if (result.qualityBlocked) {
+        addLog(
+          "Draft was blocked from auto-commit because it appears repetitive or restarted the scene.",
+        );
+        for (const issue of result.qualityIssues || []) {
+          addLog(`Quality block: ${issue}`);
+        }
+        return;
+      }
+
+      // If auto-accept is on, commit immediately and update state
+      if (autoAccept) {
+        await acceptContent({
+          newContent: result.newContent,
+          session: result.session,
+        });
+      } else {
+        addLog("Review the generated content below and click Accept or Reject");
+      }
+    } catch (e) {
+      const errorMsg =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      retryCountRef.current++;
+
+      // Check if we should retry (transient errors like network issues, rate limits)
+      const isTransient =
+        errorMsg.includes("rate") ||
+        errorMsg.includes("timeout") ||
+        errorMsg.includes("network") ||
+        errorMsg.includes("500") ||
+        errorMsg.includes("502") ||
+        errorMsg.includes("503") ||
+        errorMsg.includes("fetch");
+
+      if (isTransient && retryCountRef.current <= MAX_RETRIES) {
+        const delay = Math.pow(2, retryCountRef.current) * 1000; // Exponential backoff: 2s, 4s, 8s
+        addLog(
+          `Error: ${errorMsg}. Retrying in ${delay / 1000}s... (attempt ${retryCountRef.current}/${MAX_RETRIES})`,
+        );
+        setTimeout(() => {
+          iterate();
+        }, delay);
+        return;
+      }
+
+      // Max retries exceeded or permanent error
+      setError(errorMsg);
+      addLog(
+        `Error: ${errorMsg}${retryCountRef.current > 1 ? ` (after ${retryCountRef.current} attempts)` : ""}`,
+      );
+      retryCountRef.current = 0;
+      if (session) {
+        applySessionSnapshot({ ...session, status: "paused" });
+      }
+    }
+  };
+
+  const acceptContent = async (result?: {
+    newContent?: string;
+    session?: AutonomousSession;
+  }): Promise<void> => {
+    const activeSession = result?.session || session;
+    if (!activeSession) return;
+
+    const content = result?.newContent || pendingContent;
+    if (!content) return;
+
+    try {
+      const acceptResult = await api.autonomous.accept(activeSession.id, {
+        content,
+        wordCount: content.split(/\s+/).filter(Boolean).length,
+      });
+
+      // Update local state
+      applySessionSnapshot(acceptResult.session);
+      setGeneratedContent(content);
+      onWordsGenerated(acceptResult.totalProjectWords);
+
+      // Update chapter in parent - use completedChapterId to ensure we update the right chapter
+      // (session.chapterId may have already moved to next chapter in book mode)
+      // MUST await to prevent race condition with onRefreshProject
+      await onChapterUpdate(
+        acceptResult.completedChapterId || acceptResult.session.chapterId,
+        {
+          content: acceptResult.chapterContent,
+          wordCount: acceptResult.chapterWordCount,
+        },
+      );
+
+      addLog(`Accepted: +${countWords(content)} words committed`);
+      if (acceptResult.plotPointHit) {
+        addLog(`Plot point confirmed: "${acceptResult.plotPointHit}"`);
+      }
+
+      if (acceptResult.movingToNextChapter) {
+        addLog(`Chapter complete! Moving to: ${acceptResult.nextChapterTitle}`);
+        setGeneratedContent("");
+        // Refresh project to get updated chapter list from server
+        await onRefreshProject();
+      }
+
+      if (acceptResult.session.status === "completed") {
+        if (acceptResult.session.mode === "book") {
+          addLog(
+            `BOOK COMPLETE! ${acceptResult.session.chaptersCompleted.length} chapters`,
+          );
+        } else {
+          addLog(`Chapter complete!`);
+        }
+      }
+    } catch (e) {
+      const errorMsg =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(errorMsg);
+      addLog(`Error accepting: ${errorMsg}`);
+    }
+  };
+
+  const rejectContent = async (): Promise<void> => {
+    if (!session || !pendingContent) return;
+
+    try {
+      const updated = await api.autonomous.reject(session.id);
+      applySessionSnapshot(updated);
+      addLog("Rejected generated content - will regenerate");
+    } catch (e) {
+      const errorMsg =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(errorMsg);
+      addLog(`Error rejecting: ${errorMsg}`);
+    }
+  };
+
+  const pauseSession = async (): Promise<void> => {
+    if (!session || isPausing) return;
+    setIsPausing(true);
+    try {
+      const updated = await api.autonomous.pause(session.id);
+      applySessionSnapshot(updated);
+      addLog("Session paused");
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(message);
+      addLog(`Pause failed: ${message}`);
+    } finally {
+      setIsPausing(false);
+    }
+  };
+
+  const resumeSession = async (): Promise<void> => {
+    if (!session || isResuming) return;
+    setIsResuming(true);
+    try {
+      const updated = await api.autonomous.resume(session.id);
+      applySessionSnapshot(updated);
+      addLog("Session resumed");
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(message);
+      addLog(`Resume failed: ${message}`);
+    } finally {
+      setIsResuming(false);
+    }
+  };
+
+  const stopSession = async (): Promise<void> => {
+    if (!session || isStopping) return;
+    setIsStopping(true);
+    setShowStopConfirm(false);
+    try {
+      const updated = await api.autonomous.stop(session.id);
+      applySessionSnapshot(updated);
+      addLog(
+        `Session stopped. Generated ${updated.generatedWords.toLocaleString()} words.`,
+      );
+    } catch (e) {
+      const message =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(message);
+      addLog(`Stop failed: ${message}`);
+    } finally {
+      setIsStopping(false);
+    }
+  };
+
+  const progress = session
+    ? (session.generatedWords / session.targetWords) * 100
+    : 0;
+  const plotProgress =
+    session && session.plotPointsToHit?.length > 0
+      ? ((session.plotPointsHit?.length || 0) /
+          session.plotPointsToHit.length) *
+        100
+      : 0;
+  const pendingWordCount = pendingContent
+    ? session?.pendingDraftWords || countWords(pendingContent)
+    : 0;
+
+  const hasStoryBible =
+    storyBible &&
+    (storyBible.premise?.logline ||
+      storyBible.characters?.length > 0 ||
+      storyBible.chapterOutlines?.length > 0 ||
+      storyBible.plotStructure?.plotThreads?.length > 0);
+
+  return (
+    <div className="autonomous-shell space-y-6">
+      {/* Header */}
+      <div className="rounded-xl border border-stone-200 p-6 bg-white">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <div className="relative mb-2" style={{ display: "inline-block" }}>
+              <span
+                style={{
+                  position: "absolute",
+                  left: 0,
+                  right: 0,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  height: "1.2em",
+                  borderRadius: "0.2em",
+                  background:
+                    "linear-gradient(90deg, #ff0000 0%, #ff7f00 16%, #ffff00 32%, #00ff00 48%, #0000ff 64%, #4b0082 80%, #8f00ff 100%)",
+                  opacity: 0.35,
+                  zIndex: 1,
+                }}
+              />
+              <h2
+                className="text-xl font-semibold text-stone-800 relative z-10"
+                style={{ position: "relative", zIndex: 2 }}
+              >
+                Chapter-Driven Autonomous Writer
+              </h2>
+            </div>
+            <p className="text-sm text-stone-500">
+              Write through chapter beats and active threads without dragging
+              act structure into the prompt.
+            </p>
+          </div>
+          {session?.status === "running" && (
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse"></span>
+              <span className="text-sm text-green-600 font-medium">
+                Writing in background...
+              </span>
+            </div>
+          )}
+          {session?.status === "paused" && pendingContent && (
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 bg-amber-500 rounded-full"></span>
+              <span className="text-sm text-amber-600 font-medium">
+                Waiting for review
+              </span>
+            </div>
+          )}
+        </div>
+
+        {!hasStoryBible && (
+          <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
+            <p className="font-medium">Story Bible recommended</p>
+            <p className="mt-1">
+              For best results, set up your Story Bible first with characters,
+              chapter beats, and plot threads. The autonomous writer now follows
+              chapter-level guidance instead of act structure.
+            </p>
+          </div>
+        )}
+      </div>
+
+      {/* Setup Panel - shown when no active session */}
+      {(!session ||
+        session.status === "completed" ||
+        session.status === "stopped") && (
+        <div className="grid grid-cols-3 gap-6">
+          {/* Left: Chapter Selection */}
+          <div className="bg-white rounded-xl border border-stone-200 p-6">
+            <h3 className="font-semibold text-stone-800 mb-4">
+              Select Chapter
+            </h3>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {chapters.map((chapter) => (
+                <button
+                  key={chapter.id}
+                  onClick={() => setSelectedChapterId(chapter.id)}
+                  className={`w-full text-left px-4 py-3 rounded-lg border transition-colors ${
+                    selectedChapterId === chapter.id
+                      ? "border-stone-800 bg-stone-50"
+                      : "border-stone-200 hover:border-stone-300"
+                  }`}
+                >
+                  <div className="font-medium text-stone-800">
+                    {chapter.title}
+                  </div>
+                  <div className="text-sm text-stone-500">
+                    {chapter.wordCount.toLocaleString()} words
+                  </div>
+                </button>
+              ))}
+              {chapters.length === 0 && (
+                <p className="text-stone-500 text-sm">
+                  No chapters yet. Create one in the Editor.
+                </p>
+              )}
+            </div>
+          </div>
+
+          {/* Middle: Chapter Guidance */}
+          <div className="bg-white rounded-xl border border-stone-200 p-6">
+            <h3 className="font-semibold text-stone-800 mb-4">
+              Chapter Guidance
+            </h3>
+
+            {currentChapterOutline &&
+            currentChapterOutline.beats &&
+            currentChapterOutline.beats.length > 0 ? (
+              <div className="mb-4">
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg mb-3">
+                  <div className="text-xs font-medium text-purple-700 mb-1">
+                    Chapter {currentChapterNumber}:{" "}
+                    {currentChapterOutline.title}
+                  </div>
+                  <p className="text-sm text-purple-600">
+                    {currentChapterOutline.summary}
+                  </p>
+                  {currentChapterOutline.location && (
+                    <div className="text-xs text-purple-500 mt-1">
+                      Location: {currentChapterOutline.location}
+                    </div>
+                  )}
+                  {currentChapterOutline.timeframe && (
+                    <div className="text-xs text-purple-500 mt-1">
+                      Timeframe: {currentChapterOutline.timeframe}
+                    </div>
+                  )}
+                </div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Chapter Beats ({selectedPlotPoints.length} selected)
+                </label>
+                <div className="space-y-2 max-h-40 overflow-y-auto">
+                  {currentChapterOutline.beats
+                    .filter((b) => b.trim())
+                    .map((beat, i) => (
+                      <label
+                        key={i}
+                        className={`flex items-start gap-2 p-2 rounded cursor-pointer ${
+                          selectedPlotPoints.includes(beat)
+                            ? "bg-purple-100"
+                            : "hover:bg-purple-50"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedPlotPoints.includes(beat)}
+                          onChange={() => togglePlotPoint(beat)}
+                          className="mt-1 rounded"
+                        />
+                        <span className="text-sm text-stone-700">{beat}</span>
+                      </label>
+                    ))}
+                </div>
+              </div>
+            ) : (
+              <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800 mb-4">
+                No chapter outline for Chapter {currentChapterNumber}. Add
+                chapter beats in Story Bible → Chapters to drive autonomous
+                writing cleanly.
+              </div>
+            )}
+
+            {/* Active Plot Threads */}
+            {storyBible?.plotStructure?.plotThreads &&
+              storyBible.plotStructure.plotThreads.length > 0 && (
+                <div className="mt-4 pt-4 border-t border-stone-200">
+                  <h4 className="text-sm font-medium text-stone-700 mb-2">
+                    Plot Threads (Ch. {currentChapterNumber})
+                  </h4>
+                  <div className="space-y-2">
+                    {storyBible.plotStructure.plotThreads
+                      .filter((t) => {
+                        // Filter threads relevant to current chapter
+                        // Thread must have introducedIn set and be <= current chapter
+                        const isIntroduced =
+                          t.introducedIn !== undefined &&
+                          t.introducedIn <= currentChapterNumber;
+                        // Thread must not be resolved before current chapter
+                        const isNotResolved =
+                          !t.resolvedIn || t.resolvedIn >= currentChapterNumber;
+                        // Include active, setup, and dormant threads (dormant may reactivate)
+                        const isRelevant = t.status !== "resolved";
+                        return isIntroduced && isNotResolved && isRelevant;
+                      })
+                      .map((thread) => (
+                        <label
+                          key={thread.id}
+                          className={`block p-3 rounded border cursor-pointer ${
+                            selectedThreads.includes(thread.id)
+                              ? "bg-blue-50 border-blue-300"
+                              : "bg-stone-50 border-stone-200 hover:bg-stone-100"
+                          }`}
+                        >
+                          <div className="flex items-start gap-3">
+                            <input
+                              type="checkbox"
+                              checked={selectedThreads.includes(thread.id)}
+                              onChange={() => toggleThread(thread.id)}
+                              className="mt-1 rounded"
+                            />
+                            <div className="flex-1">
+                              <div className="flex items-start justify-between gap-2 mb-1">
+                                <div className="flex items-center gap-2">
+                                  <span
+                                    className={`w-2 h-2 rounded-full ${
+                                      thread.tension === "critical"
+                                        ? "bg-red-500"
+                                        : thread.tension === "high"
+                                          ? "bg-orange-500"
+                                          : thread.tension === "medium"
+                                            ? "bg-yellow-500"
+                                            : "bg-blue-500"
+                                    }`}
+                                  ></span>
+                                  <span className="text-xs font-medium text-stone-800">
+                                    {thread.name}
+                                  </span>
+                                </div>
+                                <span className="text-xs px-2 py-0.5 bg-stone-200 rounded text-stone-600">
+                                  {thread.type}
+                                </span>
+                              </div>
+                              {thread.currentState && (
+                                <p className="text-xs text-stone-600 mb-1">
+                                  {thread.currentState}
+                                </p>
+                              )}
+                              {thread.nextMilestone && (
+                                <div className="text-xs text-stone-500 flex items-start gap-1 mb-1">
+                                  <span className="text-amber-600">→</span>
+                                  <span>{thread.nextMilestone}</span>
+                                </div>
+                              )}
+                              {thread.keyCharacters &&
+                                thread.keyCharacters.length > 0 && (
+                                  <div className="flex flex-wrap gap-1">
+                                    {thread.keyCharacters.map((char, i) => (
+                                      <span
+                                        key={i}
+                                        className="text-xs px-1.5 py-0.5 bg-blue-100 text-blue-700 rounded"
+                                      >
+                                        {char}
+                                      </span>
+                                    ))}
+                                  </div>
+                                )}
+                            </div>
+                          </div>
+                        </label>
+                      ))}
+                    {/* Show unassigned threads - selectable */}
+                    {storyBible.plotStructure.plotThreads.filter(
+                      (t) =>
+                        t.introducedIn === undefined && t.status !== "resolved",
+                    ).length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-amber-200">
+                        <div className="text-xs font-medium text-amber-700 mb-2">
+                          Unassigned Threads (no chapter set)
+                        </div>
+                        {storyBible.plotStructure.plotThreads
+                          .filter(
+                            (t) =>
+                              t.introducedIn === undefined &&
+                              t.status !== "resolved",
+                          )
+                          .map((thread) => (
+                            <label
+                              key={thread.id}
+                              className={`block p-2 rounded border cursor-pointer mb-1 ${
+                                selectedThreads.includes(thread.id)
+                                  ? "bg-amber-100 border-amber-400"
+                                  : "bg-amber-50 border-amber-200 hover:bg-amber-100"
+                              }`}
+                            >
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedThreads.includes(thread.id)}
+                                  onChange={() => toggleThread(thread.id)}
+                                  className="rounded"
+                                />
+                                <span className="text-xs text-amber-800">
+                                  {thread.name}
+                                </span>
+                                <span className="text-xs px-1.5 py-0.5 bg-amber-200 rounded text-amber-700">
+                                  {thread.type}
+                                </span>
+                              </div>
+                            </label>
+                          ))}
+                        <div className="text-xs text-amber-600 mt-1">
+                          Tip: Set "Introduced In" chapter in Story Bible → Plot
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+          </div>
+
+          {/* Right: Settings & Start */}
+          <div className="bg-white rounded-xl border border-stone-200 p-6">
+            <h3 className="font-semibold text-stone-800 mb-4">
+              Writing Settings
+            </h3>
+
+            <div className="space-y-4">
+              {/* Mode Selection */}
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  Writing Mode
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setMode("chapter")}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      mode === "chapter"
+                        ? "bg-stone-800 text-white"
+                        : "bg-stone-100 text-stone-600 hover:bg-stone-200"
+                    }`}
+                  >
+                    Single Chapter
+                  </button>
+                  <button
+                    onClick={switchToBookMode}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      mode === "book"
+                        ? "bg-green-600 text-white"
+                        : "bg-stone-100 text-stone-600 hover:bg-stone-200"
+                    }`}
+                  >
+                    Full Book
+                  </button>
+                </div>
+              </div>
+
+              {/* Book mode: chapter selection */}
+              {mode === "book" && (
+                <div className="p-3 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-sm font-medium text-green-800">
+                      Chapters to Write
+                    </label>
+                    <button
+                      onClick={selectAllChapters}
+                      className="text-xs text-green-600 hover:text-green-800"
+                    >
+                      Select All
+                    </button>
+                  </div>
+                  <div className="space-y-1 max-h-56 overflow-y-auto">
+                    {chapters.map((ch) => (
+                      <label
+                        key={ch.id}
+                        className="flex items-center gap-2 text-sm"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedChapters.includes(ch.id)}
+                          onChange={() => toggleChapterSelection(ch.id)}
+                          className="rounded"
+                        />
+                        <span className="text-green-700">{ch.title}</span>
+                      </label>
+                    ))}
+                  </div>
+                  <div className="mt-2 text-xs text-green-600">
+                    {selectedChapters.length} chapters selected
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-sm font-medium text-stone-700 mb-2">
+                  {mode === "book" ? "Words per Chapter" : "Target Words"}
+                </label>
+                <div className="flex items-center gap-3">
+                  <input
+                    type="range"
+                    min={1000}
+                    max={20000}
+                    step={500}
+                    value={
+                      mode === "book"
+                        ? wordsPerChapterDisplay
+                        : targetWordsDisplay
+                    }
+                    onChange={(e) =>
+                      mode === "book"
+                        ? handleWordsPerChapterChange(Number(e.target.value))
+                        : handleTargetWordsChange(Number(e.target.value))
+                    }
+                    className="flex-1"
+                  />
+                  <input
+                    type="number"
+                    value={
+                      mode === "book"
+                        ? wordsPerChapterDisplay
+                        : targetWordsDisplay
+                    }
+                    onChange={(e) => {
+                      const val = Math.max(
+                        500,
+                        Math.min(20000, Number(e.target.value)),
+                      );
+                      if (mode === "book") {
+                        handleWordsPerChapterChange(val);
+                      } else {
+                        handleTargetWordsChange(val);
+                      }
+                    }}
+                    className="w-24 px-2 py-1 border border-stone-300 rounded text-right text-sm"
+                  />
+                </div>
+                {mode === "book" && selectedChapters.length > 0 && (
+                  <div className="text-xs text-green-600 mt-1">
+                    Total target:{" "}
+                    {(
+                      wordsPerChapterDisplay * selectedChapters.length
+                    ).toLocaleString()}{" "}
+                    words
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="autoIterate"
+                  checked={autoIterate}
+                  onChange={(e) => setAutoIterate(e.target.checked)}
+                  className="rounded"
+                />
+                <label htmlFor="autoIterate" className="text-sm text-stone-700">
+                  Keep writing in background
+                </label>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  id="autoAcceptSetup"
+                  checked={autoAccept}
+                  onChange={(e) => setAutoAccept(e.target.checked)}
+                  className="rounded"
+                />
+                <label
+                  htmlFor="autoAcceptSetup"
+                  className="text-sm text-stone-700"
+                >
+                  Auto-accept and save each pass
+                </label>
+              </div>
+
+              <div
+                className={`rounded-lg border p-3 text-xs ${
+                  autoIterate && autoAccept
+                    ? "border-green-200 bg-green-50 text-green-700"
+                    : "border-amber-200 bg-amber-50 text-amber-700"
+                }`}
+              >
+                {autoIterate && autoAccept
+                  ? "Recommended for unattended runs. Each committed pass is saved to the project and should show up in the Editor automatically."
+                  : "With auto-accept off, autonomous writing pauses after each draft and waits for review. Nothing is committed until you accept it."}
+              </div>
+
+              {/* Characters in this chapter */}
+              {storyBible?.characters && storyBible.characters.length > 0 && (
+                <div className="pt-4 border-t border-stone-200">
+                  <h4 className="text-sm font-medium text-stone-700 mb-2">
+                    Characters Available ({storyBible.characters.length})
+                  </h4>
+                  <div className="flex flex-wrap gap-2 max-h-32 overflow-y-auto">
+                    {storyBible.characters.map((char) => {
+                      const roleStyles: Record<string, string> = {
+                        protagonist: "bg-blue-100 text-blue-700",
+                        antagonist: "bg-red-100 text-red-700",
+                        supporting: "bg-green-100 text-green-700",
+                        mentor: "bg-purple-100 text-purple-700",
+                        minor: "bg-stone-100 text-stone-600",
+                      };
+                      return (
+                        <span
+                          key={char.id}
+                          className={`px-2 py-1 text-xs rounded-full ${roleStyles[char.role] || "bg-stone-100 text-stone-700"}`}
+                          title={`${char.role}: ${char.description?.slice(0, 100) || "No description"}`}
+                        >
+                          {char.name}
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              <button
+                onClick={startSession}
+                disabled={
+                  isStarting ||
+                  (mode === "chapter" && !selectedChapterId) ||
+                  (mode === "book" && selectedChapters.length === 0)
+                }
+                className={`w-full px-6 py-4 text-white rounded-lg disabled:opacity-50 font-semibold text-lg mt-4 ${
+                  mode === "book"
+                    ? "bg-green-600 hover:bg-green-700"
+                    : "bg-stone-800 hover:bg-stone-700"
+                }`}
+              >
+                {isStarting
+                  ? "Starting..."
+                  : mode === "book"
+                    ? `Write Full Book (${selectedChapters.length} chapters)`
+                    : "Start Writing Chapter"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Active Session Panel */}
+      {session &&
+        session.status !== "completed" &&
+        session.status !== "stopped" && (
+          <div className="grid grid-cols-2 gap-6">
+            {/* Left: Progress & Controls */}
+            <div className="bg-white rounded-xl border border-stone-200 p-6">
+              <h3 className="font-semibold text-stone-800 mb-4">
+                Session Progress
+              </h3>
+
+              {/* Book Progress (if in book mode) */}
+              {bookProgress && (
+                <div className="mb-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+                  <div className="flex justify-between text-sm mb-2">
+                    <span className="font-medium text-green-800">
+                      Book Progress
+                    </span>
+                    <span className="text-green-700">
+                      Chapter {bookProgress.currentChapter} of{" "}
+                      {bookProgress.totalChapters}
+                    </span>
+                  </div>
+                  <div className="w-full bg-green-200 rounded-full h-3 overflow-hidden mb-2">
+                    <div
+                      className="bg-green-600 h-3 rounded-full transition-all duration-500"
+                      style={{
+                        width: `${(bookProgress.chaptersCompleted / bookProgress.totalChapters) * 100}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex justify-between text-xs text-green-600">
+                    <span>{bookProgress.chaptersCompleted} chapters done</span>
+                    <span>
+                      {bookProgress.totalBookWords.toLocaleString()} total words
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Narrative State Display */}
+              {narrativeState && (
+                <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs">
+                  <div className="font-medium text-blue-800 mb-1">
+                    Current Scene State
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-blue-700">
+                    <div>Time: {narrativeState.time}</div>
+                    <div>Location: {narrativeState.location}</div>
+                    <div>POV: {narrativeState.povCharacter}</div>
+                    <div>Mood: {narrativeState.mood}</div>
+                  </div>
+                </div>
+              )}
+
+              {/* Chapter Word Progress */}
+              <div className="mb-6">
+                <div className="flex justify-between text-sm mb-2">
+                  <span className="font-medium text-stone-700">
+                    {bookProgress ? "Current Chapter" : "Words Written"}
+                  </span>
+                  <span className="text-stone-600">
+                    {session.generatedWords.toLocaleString()} /{" "}
+                    {session.targetWords.toLocaleString()}
+                  </span>
+                </div>
+                <div className="w-full bg-stone-200 rounded-full h-3 overflow-hidden">
+                  <div
+                    className="bg-stone-700 h-3 rounded-full transition-all duration-500"
+                    style={{ width: `${Math.min(100, progress)}%` }}
+                  />
+                </div>
+                <div className="text-xs text-stone-500 mt-1 text-right">
+                  {Math.round(progress)}%
+                </div>
+              </div>
+
+              {/* Plot Points Progress */}
+              {session.plotPointsToHit &&
+                session.plotPointsToHit.length > 0 && (
+                  <div className="mb-6">
+                    <div className="flex justify-between text-sm mb-2">
+                      <span className="font-medium text-stone-700">
+                        Plot Points
+                      </span>
+                      <span className="text-stone-600">
+                        {session.plotPointsHit?.length || 0} /{" "}
+                        {session.plotPointsToHit.length}
+                      </span>
+                    </div>
+                    <div className="w-full bg-blue-100 rounded-full h-3 overflow-hidden">
+                      <div
+                        className="bg-blue-600 h-3 rounded-full transition-all duration-500"
+                        style={{ width: `${plotProgress}%` }}
+                      />
+                    </div>
+                    <div className="mt-3 space-y-2">
+                      {session.plotPointsToHit.map((point, i) => (
+                        <div
+                          key={i}
+                          className={`flex items-start gap-2 text-sm ${
+                            session.plotPointsHit?.includes(point)
+                              ? "text-green-700"
+                              : "text-stone-500"
+                          }`}
+                        >
+                          <span
+                            className={`mt-0.5 ${session.plotPointsHit?.includes(point) ? "text-green-500" : "text-stone-300"}`}
+                          >
+                            {session.plotPointsHit?.includes(point) ? "✓" : "○"}
+                          </span>
+                          <span>{point}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+              {/* Controls */}
+              {session.pauseReason && !pendingContent && (
+                <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+                  <div className="font-medium">
+                    Session paused automatically
+                  </div>
+                  <div className="mt-1">{session.pauseReason}</div>
+                </div>
+              )}
+
+              {pendingContent && (
+                <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+                  <div className="font-medium">
+                    Unsaved draft waiting for review
+                  </div>
+                  <div className="mt-1">
+                    {pendingWordCount.toLocaleString()} words are queued below.
+                    Resume is blocked until you accept or reject this draft.
+                  </div>
+                </div>
+              )}
+
+              <div className="flex gap-3">
+                {session.status === "running" ? (
+                  <button
+                    onClick={pauseSession}
+                    disabled={isPausing}
+                    className="flex-1 px-4 py-3 bg-amber-500 text-white rounded-lg hover:bg-amber-600 font-medium disabled:opacity-50"
+                  >
+                    {isPausing ? "Pausing..." : "Pause"}
+                  </button>
+                ) : (
+                  <button
+                    onClick={resumeSession}
+                    disabled={isResuming || !!pendingContent}
+                    className="flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium disabled:opacity-50"
+                  >
+                    {pendingContent
+                      ? "Review Draft First"
+                      : isResuming
+                        ? "Resuming..."
+                        : "Resume"}
+                  </button>
+                )}
+                {showStopConfirm ? (
+                  <div className="flex-1 flex gap-2">
+                    <button
+                      onClick={stopSession}
+                      disabled={isStopping}
+                      className="flex-1 px-3 py-3 bg-red-700 text-white rounded-lg hover:bg-red-800 font-medium text-sm disabled:opacity-50"
+                    >
+                      {isStopping ? "Stopping..." : "Confirm Stop"}
+                    </button>
+                    <button
+                      onClick={() => setShowStopConfirm(false)}
+                      className="px-3 py-3 border border-stone-300 rounded-lg hover:bg-stone-50 text-sm"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    onClick={() => setShowStopConfirm(true)}
+                    className="flex-1 px-4 py-3 bg-red-600 text-white rounded-lg hover:bg-red-700 font-medium"
+                  >
+                    Stop & Save
+                  </button>
+                )}
+                {session.status === "paused" &&
+                  !showStopConfirm &&
+                  !pendingContent && (
+                    <button
+                      onClick={iterate}
+                      className="px-4 py-3 border border-stone-300 rounded-lg hover:bg-stone-50 font-medium"
+                    >
+                      Single Step
+                    </button>
+                  )}
+              </div>
+
+              {/* Stats */}
+              <div className="grid grid-cols-4 gap-4 mt-6 p-4 bg-stone-50 rounded-lg">
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-stone-800">
+                    {session.iterations}
+                  </div>
+                  <div className="text-xs text-stone-500">Iterations</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-stone-800">
+                    {session.generatedWords > 0 && session.iterations > 0
+                      ? Math.round(session.generatedWords / session.iterations)
+                      : 0}
+                  </div>
+                  <div className="text-xs text-stone-500">Avg words/iter</div>
+                </div>
+                <div className="text-center">
+                  <div className="text-2xl font-bold text-stone-800">
+                    {project.wordCount.toLocaleString()}
+                  </div>
+                  <div className="text-xs text-stone-500">Project total</div>
+                </div>
+                {session.mode === "book" && (
+                  <div className="text-center">
+                    <div className="text-2xl font-bold text-green-600">
+                      {session.chaptersCompleted?.length || 0}/
+                      {session.chaptersToWrite?.length || 0}
+                    </div>
+                    <div className="text-xs text-stone-500">Chapters done</div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Right: Preview & Log */}
+            <div className="bg-white rounded-xl border border-stone-200 p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="font-semibold text-stone-800">
+                  {pendingContent
+                    ? "Review Generated Content"
+                    : "Latest Saved Output"}
+                </h3>
+                <label className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={autoAccept}
+                    onChange={(e) => setAutoAccept(e.target.checked)}
+                    className="rounded"
+                  />
+                  <span className="text-stone-600">Auto-accept</span>
+                </label>
+              </div>
+
+              {/* Pending Content Preview - needs approval */}
+              {pendingContent && (
+                <div className="mb-4">
+                  <div className="bg-amber-50 border-2 border-amber-300 rounded-lg p-4 h-48 overflow-y-auto font-serif text-stone-700 text-sm leading-relaxed">
+                    <div className="text-xs text-amber-600 font-sans font-medium mb-2 uppercase tracking-wide">
+                      Preview - Not Yet Saved (
+                      {pendingWordCount.toLocaleString()} words)
+                    </div>
+                    {pendingContent}
+                  </div>
+                  <div className="flex gap-3 mt-3">
+                    <button
+                      onClick={() => acceptContent()}
+                      className="flex-1 px-4 py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 font-semibold"
+                    >
+                      Accept & Continue
+                    </button>
+                    <button
+                      onClick={rejectContent}
+                      className="flex-1 px-4 py-3 bg-red-500 text-white rounded-lg hover:bg-red-600 font-semibold"
+                    >
+                      Reject & Regenerate
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Accepted Content Display */}
+              <div className="mb-4">
+                <div className="text-xs text-stone-500 font-medium mb-1">
+                  {pendingContent
+                    ? "Most Recent Saved Output"
+                    : "Most Recent Saved Output"}
+                </div>
+                <div
+                  className={`bg-stone-50 border border-stone-200 rounded-lg p-4 overflow-y-auto font-serif text-stone-700 text-sm leading-relaxed ${pendingContent ? "h-24" : "h-48"}`}
+                >
+                  {generatedContent || (
+                    <span className="text-stone-400 italic">
+                      The latest committed autonomous passage will appear here,
+                      and committed passes should also show up in the Editor.
+                    </span>
+                  )}
+                  <div ref={contentEndRef} />
+                </div>
+              </div>
+
+              {/* Activity Log */}
+              <div>
+                <div className="text-sm font-medium text-stone-700 mb-2">
+                  Activity Log
+                </div>
+                <div className="bg-stone-900 text-green-400 p-3 rounded-lg h-28 overflow-auto font-mono text-xs">
+                  {log.map((entry, i) => (
+                    <div key={i}>{entry}</div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Error Display */}
+      {error && (
+        <div className="p-4 bg-red-50 border border-red-200 rounded-lg text-red-700">
+          {error}
+        </div>
+      )}
+
+      {/* Info Panel */}
+      <div className="bg-blue-50 border border-blue-100 rounded-lg p-4 text-sm text-blue-800">
+        <p className="font-medium mb-2">How Chapter-Driven Writing Works</p>
+        <ul className="text-blue-700 text-xs space-y-1">
+          <li>
+            • Select a chapter and use its chapter beats as the writing target
+          </li>
+          <li>
+            • Choose which chapter beats and plot threads should stay in focus
+          </li>
+          <li>
+            • The AI writes in short iterations, systematically landing the
+            selected chapter beats
+          </li>
+          <li>
+            • With background writing enabled, the server keeps the session
+            moving even if you leave this page
+          </li>
+          <li>
+            • Uses your characters, world rules, and style directives for
+            consistency
+          </li>
+          <li>
+            • 10k character bidirectional context window maintains narrative
+            coherence
+          </li>
+          <li>• Pause anytime to review, edit, or adjust the direction</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
