@@ -1,0 +1,25 @@
+name = "magnum-opus"
+main = "src/index.ts"  # Correct entry point
+compatibility_date = "2024-01-01"
+
+[env.production]
+name = "magnum-opus-prod"
+
+[env.staging]
+name = "magnum-opus-staging"
+
+# D1 database binding
+[[d1_databases]]
+binding = "DB"
+database_name = "magnum-opus-db"
+database_id = "296bb9a4-ee7c-4087-8cd8-1868cbcc64a6"
+
+# Durable Objects configuration
+[[durable_objects.bindings]]
+name = "MagnumOpusBackend"
+class_name = "MagnumOpusBackend"
+
+# Durable Objects migrations
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MagnumOpusBackend"]

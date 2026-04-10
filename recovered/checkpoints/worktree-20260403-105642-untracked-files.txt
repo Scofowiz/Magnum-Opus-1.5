@@ -1,0 +1,10 @@
+recovered/checkpoints/storyBible-checkpoint-2026-04-03.patch
+recovered/checkpoints/worktree-20260403-105642-status.txt
+recovered/checkpoints/worktree-20260403-105642-tracked-files.txt
+recovered/checkpoints/worktree-20260403-105642-tracked.patch
+recovered/checkpoints/worktree-20260403-105642-untracked-files.txt
+recovered/the-education-of-a-monster.html
+recovered/the-education-of-a-monster.txt
+server/src/services/projects/chapterOutline.ts
+src/lib/chapterOutline.ts
+tsconfig.tsbuildinfo

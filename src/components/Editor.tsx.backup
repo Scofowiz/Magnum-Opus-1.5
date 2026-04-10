@@ -1,0 +1,1297 @@
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useRef,
+  useMemo,
+  type JSX,
+} from "react";
+import { useEditor, EditorContent } from "@tiptap/react";
+import StarterKit from "@tiptap/starter-kit";
+import Placeholder from "@tiptap/extension-placeholder";
+import { api } from "../api/client";
+import type {
+  Chapter,
+  ChapterOutline,
+  GenerationResult,
+  Project,
+} from "../types/magnumOpus";
+import { exportDocument, ExportFormat } from "../utils/exportDocument";
+import { playUiSound } from "../utils/uiSound";
+const LOCAL_DRAFT_PREFIX = "magnum-opus:local-draft";
+const LOCAL_DRAFT_FLUSH_MS = 600;
+
+interface EditorProps {
+  project: Project;
+  chapter: Chapter | null;
+  chapters: Chapter[];
+  onChapterChange: (chapter: Chapter) => void;
+  onChapterUpdate: (chapterId: string, updates: Partial<Chapter>) => void;
+  onChapterLocalUpdate: (chapterId: string, updates: Partial<Chapter>) => void;
+  onAddChapter: () => void;
+  onDeleteChapter: (chapterId: string) => void;
+  onProjectUpdate: (updates: Partial<Project>) => void;
+}
+
+interface CursorContextSnapshot {
+  before: string;
+  after: string;
+  selectionFrom: number;
+  selectionTo: number;
+  selectedText: string;
+}
+
+interface GenerationAnchor {
+  chapterId: string | null;
+  from: number;
+  to: number;
+}
+
+export function Editor({
+  project,
+  chapter,
+  chapters,
+  onChapterChange,
+  onChapterUpdate,
+  onChapterLocalUpdate,
+  onAddChapter,
+  onDeleteChapter,
+}: EditorProps): JSX.Element {
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [lastGeneration, setLastGeneration] = useState<GenerationResult | null>(
+    null,
+  );
+  const [error, setError] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState("");
+  const [targetWords, setTargetWords] = useState(500);
+  const [showChapterList, setShowChapterList] = useState(true);
+  const [autoSaveStatus, setAutoSaveStatus] = useState<
+    "saved" | "saving" | "unsaved"
+  >("saved");
+  const [pendingContent, setPendingContent] = useState<string | null>(null);
+  const [autoAccept, setAutoAccept] = useState(false);
+  const [targetWordsDisplay, setTargetWordsDisplay] = useState(500);
+  const [showExportMenu, setShowExportMenu] = useState(false);
+  const [beatsExpanded, setBeatsExpanded] = useState(false);
+  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
+  const [localBackupReady, setLocalBackupReady] = useState(false);
+  const saveTimeoutRef = useRef<NodeJS.Timeout>();
+  const localDraftTimeoutRef = useRef<NodeJS.Timeout>();
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const sliderDebounceRef = useRef<NodeJS.Timeout>();
+  const lastEditorContentRef = useRef<string>(chapter?.content || "");
+  const lastSavedContentRef = useRef<string>(chapter?.content || "");
+  const lastSaveRef = useRef<number>(0);
+  const suppressEditorUpdateRef = useRef(false);
+  const pendingGenerationAnchorRef = useRef<GenerationAnchor | null>(null);
+  const lastGenerationAnchorRef = useRef<GenerationAnchor | null>(null);
+  const capturedGenerateContextRef = useRef<CursorContextSnapshot | null>(null);
+  const draftKey = useMemo(
+    () =>
+      chapter ? `${LOCAL_DRAFT_PREFIX}:${project.id}:${chapter.id}` : null,
+    [project.id, chapter?.id],
+  );
+
+  const persistLocalDraft = useCallback(
+    (content: string) => {
+      if (!draftKey || !chapter || typeof window === "undefined") return;
+
+      try {
+        window.localStorage.setItem(
+          draftKey,
+          JSON.stringify({
+            projectId: project.id,
+            chapterId: chapter.id,
+            chapterTitle: chapter.title,
+            content,
+            savedAt: new Date().toISOString(),
+          }),
+        );
+        const nextReady = content !== lastSavedContentRef.current;
+        setLocalBackupReady((previous) =>
+          previous === nextReady ? previous : nextReady,
+        );
+      } catch (storageError) {
+        console.error("Failed to persist local draft:", storageError);
+      }
+    },
+    [chapter, draftKey, project.id],
+  );
+
+  const clearLocalDraft = useCallback(() => {
+    if (!draftKey || typeof window === "undefined") return;
+
+    try {
+      window.localStorage.removeItem(draftKey);
+    } catch (storageError) {
+      console.error("Failed to clear local draft:", storageError);
+    }
+
+    setLocalBackupReady((previous) => (previous ? false : previous));
+  }, [draftKey]);
+
+  const flushCrashRecovery = useCallback(
+    (content: string, sendBeacon = false) => {
+      if (!chapter || !content.trim()) return;
+
+      persistLocalDraft(content);
+
+      if (
+        sendBeacon &&
+        typeof navigator !== "undefined" &&
+        content !== lastSavedContentRef.current &&
+        typeof navigator.sendBeacon === "function"
+      ) {
+        const payload = new Blob(
+          [JSON.stringify({ content, trigger: "pagehide" })],
+          {
+            type: "application/json",
+          },
+        );
+        navigator.sendBeacon(`${API}/api/chapters/${chapter.id}/save`, payload);
+      }
+    },
+    [chapter, persistLocalDraft],
+  );
+
+  // Sync display value when actual value changes (e.g., from parent)
+  useEffect(() => {
+    setTargetWordsDisplay(targetWords);
+  }, [targetWords]);
+
+  // Ironclad save - uses triple redundancy endpoint
+  const ironcladSave = useCallback(
+    async (content: string, trigger: string) => {
+      if (!chapter) return;
+
+      // Prevent duplicate saves of same content
+      if (
+        content === lastSavedContentRef.current &&
+        Date.now() - lastSaveRef.current < 1000
+      ) {
+        return;
+      }
+
+      lastSaveRef.current = Date.now();
+      setAutoSaveStatus("saving");
+      persistLocalDraft(content);
+
+      try {
+        const saveResult = await api.chapters.save(chapter.id, {
+          content,
+          trigger,
+        });
+        lastSavedContentRef.current = content;
+        clearLocalDraft();
+        setAutoSaveStatus("saved");
+        onChapterLocalUpdate(chapter.id, {
+          content,
+          wordCount: saveResult.wordCount,
+        });
+      } catch (e) {
+        console.error("Ironclad save failed:", e);
+        setAutoSaveStatus("unsaved");
+        // Fallback to regular save
+        try {
+          lastSavedContentRef.current = content;
+          await onChapterUpdate(chapter.id, { content });
+          clearLocalDraft();
+          setAutoSaveStatus("saved");
+        } catch (fallbackError) {
+          console.error("Fallback save also failed:", fallbackError);
+        }
+      }
+    },
+    [
+      chapter,
+      clearLocalDraft,
+      onChapterLocalUpdate,
+      onChapterUpdate,
+      persistLocalDraft,
+    ],
+  );
+
+  // Detect save trigger from content change
+  const detectSaveTrigger = useCallback(
+    (oldContent: string, newContent: string): string | null => {
+      if (newContent === oldContent) {
+        return null;
+      }
+
+      if (newContent.length < oldContent.length) {
+        // Deletion - don't trigger immediate save
+        return null;
+      }
+
+      const diff = newContent.slice(oldContent.length);
+
+      // Paragraph break: double newline
+      if (/\n\n$/.test(newContent) || /<\/p>\s*<p>/.test(diff)) {
+        return "paragraph";
+      }
+
+      // Paste detection: large content addition
+      if (diff.length > 20) {
+        return "paste";
+      }
+
+      return null;
+    },
+    [],
+  );
+
+  // Debounced slider handler to prevent excessive re-renders
+  const handleTargetWordsChange = useCallback((value: number) => {
+    setTargetWordsDisplay(value);
+    if (sliderDebounceRef.current) {
+      clearTimeout(sliderDebounceRef.current);
+    }
+    sliderDebounceRef.current = setTimeout(() => {
+      setTargetWords(value);
+    }, 150);
+  }, []);
+
+  const editor = useEditor({
+    extensions: [
+      StarterKit,
+      Placeholder.configure({
+        placeholder: "Begin writing your story...",
+      }),
+    ],
+    content: chapter?.content || "",
+    onUpdate: ({ editor }) => {
+      if (suppressEditorUpdateRef.current) {
+        suppressEditorUpdateRef.current = false;
+        return;
+      }
+
+      const newContent = editor.getHTML();
+      const oldContent = lastEditorContentRef.current;
+
+      if (newContent === oldContent) {
+        return;
+      }
+
+      lastEditorContentRef.current = newContent;
+
+      setAutoSaveStatus((previous) =>
+        previous === "unsaved" ? previous : "unsaved",
+      );
+
+      // Clear any pending idle save
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+      }
+      if (localDraftTimeoutRef.current) {
+        clearTimeout(localDraftTimeoutRef.current);
+      }
+
+      localDraftTimeoutRef.current = setTimeout(() => {
+        persistLocalDraft(newContent);
+      }, LOCAL_DRAFT_FLUSH_MS);
+
+      // Detect if we should save immediately
+      const trigger = detectSaveTrigger(oldContent, newContent);
+
+      if (trigger) {
+        // Immediate save on higher-signal edits (paragraph breaks, paste)
+        ironcladSave(newContent, trigger);
+      } else {
+        // Save after a short pause instead of on every word boundary
+        saveTimeoutRef.current = setTimeout(() => {
+          ironcladSave(newContent, "idle");
+        }, 1500);
+      }
+    },
+  });
+
+  // Update editor when chapter changes
+  useEffect(() => {
+    if (editor && chapter) {
+      const storedDraft =
+        draftKey && typeof window !== "undefined"
+          ? window.localStorage.getItem(draftKey)
+          : null;
+      const parsedDraft = storedDraft
+        ? (JSON.parse(storedDraft) as { content?: string; savedAt?: string })
+        : null;
+      const recoveredContent =
+        parsedDraft?.content && parsedDraft.content !== (chapter.content || "")
+          ? parsedDraft.content
+          : null;
+      const nextContent = recoveredContent || chapter.content || "";
+      const currentContent = editor.getHTML();
+
+      lastEditorContentRef.current = nextContent;
+      lastSavedContentRef.current = chapter.content || "";
+
+      if (currentContent !== nextContent) {
+        suppressEditorUpdateRef.current = true;
+        editor.commands.setContent(nextContent);
+      }
+
+      if (recoveredContent) {
+        const recoveredChars = Math.max(
+          0,
+          recoveredContent.length - (chapter.content || "").length,
+        );
+        setRecoveryNotice(
+          `Recovered local draft from ${new Date(parsedDraft?.savedAt || Date.now()).toLocaleTimeString()} with about ${recoveredChars} characters beyond the last durable save.`,
+        );
+        setAutoSaveStatus("unsaved");
+        void playUiSound("soft-alert");
+        window.setTimeout(() => {
+          void ironcladSave(recoveredContent, "recovered_local_draft");
+        }, 0);
+      } else {
+        setRecoveryNotice(null);
+        setAutoSaveStatus("saved");
+      }
+    }
+  }, [chapter?.id, chapter?.content, draftKey, editor, ironcladSave]);
+
+  useEffect(() => {
+    if (!editor || !chapter) return undefined;
+
+    const flushLiveDraft = (): void => {
+      const liveContent = editor.getHTML();
+      flushCrashRecovery(liveContent, true);
+    };
+
+    const handleVisibilityChange = (): void => {
+      if (document.visibilityState === "hidden") {
+        flushLiveDraft();
+      }
+    };
+
+    window.addEventListener("pagehide", flushLiveDraft);
+    window.addEventListener("beforeunload", flushLiveDraft);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
+    return (): void => {
+      window.removeEventListener("pagehide", flushLiveDraft);
+      window.removeEventListener("beforeunload", flushLiveDraft);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [chapter, editor, flushCrashRecovery]);
+
+  // Get cursor context for 10k bidirectional context
+  const getCursorContext = useCallback(() => {
+    if (!editor) {
+      return {
+        before: "",
+        after: "",
+        selectionFrom: 0,
+        selectionTo: 0,
+        selectedText: "",
+      } satisfies CursorContextSnapshot;
+    }
+
+    const { from, to } = editor.state.selection;
+    const doc = editor.state.doc;
+
+    return {
+      before: doc.textBetween(0, from, "\n\n", " ").slice(-10000),
+      after: doc.textBetween(to, doc.content.size, "\n\n", " ").slice(0, 10000),
+      selectionFrom: from,
+      selectionTo: to,
+      selectedText: doc.textBetween(from, to, "\n\n", " "),
+    } satisfies CursorContextSnapshot;
+  }, [editor]);
+
+  const buildGenerationAnchor = useCallback(
+    (context: CursorContextSnapshot): GenerationAnchor => ({
+      chapterId: chapter?.id || null,
+      from: context.selectionFrom,
+      to: context.selectionTo,
+    }),
+    [chapter?.id],
+  );
+
+  const captureGenerateContext = useCallback(() => {
+    capturedGenerateContextRef.current = getCursorContext();
+  }, [getCursorContext]);
+
+  // Handle export
+  const handleExport = async (format: ExportFormat): Promise<void> => {
+    setShowExportMenu(false);
+    try {
+      await exportDocument(format, {
+        title: project.title,
+        content: chapter?.content || "",
+        chapters: chapters.map((c) => ({ title: c.title, content: c.content })),
+      });
+    } catch (e) {
+      console.error("Export failed:", e);
+      setError(
+        "Export failed: " + (e instanceof Error ? e.message : "Unknown error"),
+      );
+    }
+  };
+
+  // Close export menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent): void => {
+      if (
+        exportMenuRef.current &&
+        !exportMenuRef.current.contains(e.target as Node)
+      ) {
+        setShowExportMenu(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return (): void =>
+      document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  const generate = async (customPrompt?: string): Promise<void> => {
+    if (!editor) return;
+
+    setIsGenerating(true);
+    setError(null);
+
+    try {
+      const context = capturedGenerateContextRef.current || getCursorContext();
+      capturedGenerateContextRef.current = null;
+      const anchor = buildGenerationAnchor(context);
+      const result = await api.generation.generate({
+        projectId: project.id,
+        chapterId: chapter?.id,
+        contextBefore: context.before,
+        contextAfter: context.after,
+        prompt: customPrompt || prompt || "Continue the story naturally",
+        targetWords,
+        checkQuality: true,
+      });
+      setLastGeneration(result);
+
+      const shouldAutoAccept =
+        autoAccept && result.accepted !== false && !result.qualityFallback;
+
+      // Auto-accept only when quality gates were truly accepted.
+      if (shouldAutoAccept) {
+        insertGeneratedContent(result.text, anchor);
+        pendingGenerationAnchorRef.current = null;
+        lastGenerationAnchorRef.current = null;
+        setPrompt("");
+      } else {
+        pendingGenerationAnchorRef.current = anchor;
+        lastGenerationAnchorRef.current = anchor;
+        setPendingContent(result.text);
+        if (autoAccept && !shouldAutoAccept) {
+          setError(
+            result.qualityFallbackReason ||
+              "Auto-accept was bypassed because quality gates were not fully met. Review and accept manually.",
+          );
+        }
+      }
+    } catch (e) {
+      const errorMessage =
+        e instanceof Error ? e.message : "An unexpected error occurred";
+      setError(errorMessage);
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // Convert plain text with newlines to HTML for TipTap
+  const textToHtml = (text: string): string => {
+    return text
+      .split(/\n\n+/)
+      .map((para) => para.trim())
+      .filter((para) => para.length > 0)
+      .map((para) => `<p>${para.replace(/\n/g, "<br>")}</p>`)
+      .join("");
+  };
+
+  const insertGeneratedContent = useCallback(
+    (text: string, anchor?: GenerationAnchor | null) => {
+      if (!editor) return;
+
+      const target =
+        anchor && anchor.chapterId === chapter?.id
+          ? {
+              from: Math.max(
+                0,
+                Math.min(anchor.from, editor.state.doc.content.size),
+              ),
+              to: Math.max(
+                0,
+                Math.min(anchor.to, editor.state.doc.content.size),
+              ),
+            }
+          : {
+              from: editor.state.selection.from,
+              to: editor.state.selection.to,
+            };
+
+      editor.chain().focus().insertContentAt(target, textToHtml(text)).run();
+    },
+    [chapter?.id, editor],
+  );
+
+  const acceptPendingContent = useCallback(() => {
+    if (!editor || !pendingContent) return;
+    insertGeneratedContent(pendingContent, pendingGenerationAnchorRef.current);
+    setPendingContent(null);
+    pendingGenerationAnchorRef.current = null;
+    lastGenerationAnchorRef.current = null;
+    setPrompt("");
+  }, [editor, insertGeneratedContent, pendingContent]);
+
+  const rejectPendingContent = useCallback(() => {
+    setPendingContent(null);
+    pendingGenerationAnchorRef.current = null;
+  }, []);
+
+  const regenerate = async (): Promise<void> => {
+    if (!lastGeneration || !editor) return;
+
+    setIsGenerating(true);
+    setError(null);
+
+    try {
+      const context = capturedGenerateContextRef.current || getCursorContext();
+      capturedGenerateContextRef.current = null;
+      const anchor = buildGenerationAnchor(context);
+      const lastAnchor = lastGenerationAnchorRef.current;
+      const sameTarget =
+        !!lastAnchor &&
+        lastAnchor.chapterId === anchor.chapterId &&
+        lastAnchor.from === anchor.from &&
+        lastAnchor.to === anchor.to;
+
+      if (!sameTarget) {
+        await generate(prompt || "Continue the story naturally");
+        return;
+      }
+
+      const result = await api.generation.retry({
+        projectId: project.id,
+        previousText: lastGeneration.text,
+        feedback: prompt || "Try a different approach",
+        contextBefore: context.before,
+        contextAfter: context.after,
+      });
+      setLastGeneration({
+        text: result.text,
+        wordCount: result.wordCount,
+        qualityScore: 0.8,
+        qualityIssues: result.qualityIssues,
+        qualityFallback: result.qualityFallback,
+        accepted: result.qualityFallback ? false : true,
+        qualityFallbackReason: result.qualityFallback
+          ? "Retry returned with residual quality flags; review before inserting."
+          : undefined,
+        metadata: { tokens: 0, latencyMs: 0, attempts: 1 },
+      });
+
+      const shouldAutoAcceptRetry = autoAccept && !result.qualityFallback;
+      if (shouldAutoAcceptRetry) {
+        insertGeneratedContent(result.text, anchor);
+        pendingGenerationAnchorRef.current = null;
+        lastGenerationAnchorRef.current = null;
+        setPrompt("");
+      } else {
+        pendingGenerationAnchorRef.current = anchor;
+        lastGenerationAnchorRef.current = anchor;
+        setPendingContent(result.text);
+        if (autoAccept && !shouldAutoAcceptRetry) {
+          setError(
+            "Auto-accept was bypassed because retry output still had quality flags. Review and accept manually.",
+          );
+        }
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // Word count computed on each render - intentionally not memoized
+  // as editor content changes frequently and memoization wouldn't help
+  const wordCount = editor
+    ? editor.getText().split(/\s+/).filter(Boolean).length
+    : 0;
+  const saveStatusTone =
+    autoSaveStatus === "saved"
+      ? "text-green-600"
+      : autoSaveStatus === "saving"
+        ? "text-amber-600"
+        : "text-stone-400";
+  const saveStatusLabel =
+    autoSaveStatus === "saved"
+      ? "Saved"
+      : autoSaveStatus === "saving"
+        ? "Saving..."
+        : "Unsaved";
+
+  // Get current chapter's outline from Story Bible
+  const chapterOutline = useMemo((): ChapterOutline | null => {
+    if (!chapter || !project.storyBible?.chapterOutlines) return null;
+    const chapterNum = chapter.order + 1;
+    return (
+      project.storyBible.chapterOutlines.find(
+        (co: ChapterOutline) => co.chapterNumber === chapterNum,
+      ) || null
+    );
+  }, [chapter, project.storyBible?.chapterOutlines]);
+
+  return (
+    <div className="flex h-[calc(100vh-3.5rem)]">
+      {/* Chapter Sidebar */}
+      {showChapterList && (
+        <div className="w-64 bg-white border-r border-stone-200 flex flex-col">
+          <div className="p-4 border-b border-stone-200">
+            <h2 className="font-semibold text-stone-800">Chapters</h2>
+          </div>
+          <div className="flex-1 overflow-auto">
+            {chapters.map((ch) => (
+              <div
+                key={ch.id}
+                className={`flex items-center border-b border-stone-100 hover:bg-stone-50 ${
+                  chapter?.id === ch.id ? "bg-stone-100" : ""
+                }`}
+              >
+                <button
+                  onClick={() => onChapterChange(ch)}
+                  className="flex-1 px-4 py-3 text-left"
+                >
+                  <div className="font-medium text-stone-800">{ch.title}</div>
+                  <div className="text-sm text-stone-500">
+                    {ch.wordCount} words
+                  </div>
+                </button>
+                {chapters.length > 1 && (
+                  <button
+                    onClick={() => onDeleteChapter(ch.id)}
+                    className="px-3 py-2 text-red-500 hover:text-red-700 hover:bg-red-50"
+                    title="Delete chapter"
+                  >
+                    <svg
+                      className="w-4 h-4"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                      />
+                    </svg>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+          <div className="p-4 border-t border-stone-200">
+            <button
+              onClick={onAddChapter}
+              className="w-full px-4 py-2 text-sm bg-stone-800 text-white rounded-lg hover:bg-stone-700"
+            >
+              + Add Chapter
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main Editor */}
+      <div className="flex-1 flex flex-col bg-stone-50">
+        {/* Editor Toolbar */}
+        <div className="bg-white border-b border-stone-200 px-4 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <button
+              onClick={() => setShowChapterList(!showChapterList)}
+              className="p-2 hover:bg-stone-100 rounded"
+              title="Toggle chapters"
+            >
+              <svg
+                className="w-5 h-5"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 6h16M4 12h16M4 18h16"
+                />
+              </svg>
+            </button>
+            {chapter && (
+              <input
+                type="text"
+                value={chapter.title}
+                onChange={(e) =>
+                  onChapterUpdate(chapter.id, { title: e.target.value })
+                }
+                className="text-lg font-semibold bg-transparent border-none focus:outline-none focus:ring-2 focus:ring-stone-300 rounded px-2 py-1"
+              />
+            )}
+          </div>
+          <div className="flex items-center gap-4 text-sm text-stone-500">
+            <span>{wordCount} words</span>
+            <div className="flex items-center gap-3 rounded-full border border-stone-200 bg-stone-50 px-3 py-1.5">
+              <span
+                className={`inline-block min-w-[4.75rem] font-medium ${saveStatusTone}`}
+              >
+                {saveStatusLabel}
+              </span>
+              <span
+                className={`inline-flex items-center gap-2 text-xs font-medium ${localBackupReady ? "text-amber-700" : "text-stone-400"}`}
+              >
+                <span
+                  className={`h-2 w-2 rounded-full ${localBackupReady ? "bg-amber-500" : "bg-stone-300"}`}
+                />
+                {localBackupReady
+                  ? "Local backup live"
+                  : "Durable sync caught up"}
+              </span>
+            </div>
+            <div className="relative" ref={exportMenuRef}>
+              <button
+                onClick={() => setShowExportMenu(!showExportMenu)}
+                className="px-3 py-1 bg-stone-100 hover:bg-stone-200 rounded text-stone-700 font-medium"
+              >
+                Export
+              </button>
+              {showExportMenu && (
+                <div className="absolute right-0 top-full mt-1 bg-white border border-stone-200 rounded-lg shadow-lg py-1 z-50 min-w-36">
+                  <button
+                    onClick={() => handleExport("docx")}
+                    className="w-full px-4 py-2 text-left hover:bg-stone-100 text-stone-700"
+                  >
+                    Word (.docx)
+                  </button>
+                  <button
+                    onClick={() => handleExport("pdf")}
+                    className="w-full px-4 py-2 text-left hover:bg-stone-100 text-stone-700"
+                  >
+                    PDF
+                  </button>
+                  <button
+                    onClick={() => handleExport("md")}
+                    className="w-full px-4 py-2 text-left hover:bg-stone-100 text-stone-700"
+                  >
+                    Markdown (.md)
+                  </button>
+                  <button
+                    onClick={() => handleExport("txt")}
+                    className="w-full px-4 py-2 text-left hover:bg-stone-100 text-stone-700"
+                  >
+                    Plain Text (.txt)
+                  </button>
+                  <button
+                    onClick={() => handleExport("html")}
+                    className="w-full px-4 py-2 text-left hover:bg-stone-100 text-stone-700"
+                  >
+                    HTML
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {recoveryNotice && (
+          <div className="border-b border-amber-200 bg-amber-50 px-4 py-2 text-sm text-amber-900">
+            {recoveryNotice}
+          </div>
+        )}
+
+        {/* Formatting Toolbar */}
+        {editor && (
+          <div className="bg-white border-b border-stone-200 px-4 py-2 flex items-center gap-1">
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleBold().run()}
+              active={editor.isActive("bold")}
+              title="Bold (Ctrl+B)"
+            >
+              <span className="font-bold">B</span>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleItalic().run()}
+              active={editor.isActive("italic")}
+              title="Italic (Ctrl+I)"
+            >
+              <span className="italic">I</span>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleStrike().run()}
+              active={editor.isActive("strike")}
+              title="Strikethrough"
+            >
+              <span className="line-through">S</span>
+            </FormatButton>
+            <div className="w-px h-6 bg-stone-200 mx-2" />
+            <FormatButton
+              onClick={() =>
+                editor.chain().focus().toggleHeading({ level: 1 }).run()
+              }
+              active={editor.isActive("heading", { level: 1 })}
+              title="Heading 1"
+            >
+              H1
+            </FormatButton>
+            <FormatButton
+              onClick={() =>
+                editor.chain().focus().toggleHeading({ level: 2 }).run()
+              }
+              active={editor.isActive("heading", { level: 2 })}
+              title="Heading 2"
+            >
+              H2
+            </FormatButton>
+            <FormatButton
+              onClick={() =>
+                editor.chain().focus().toggleHeading({ level: 3 }).run()
+              }
+              active={editor.isActive("heading", { level: 3 })}
+              title="Heading 3"
+            >
+              H3
+            </FormatButton>
+            <div className="w-px h-6 bg-stone-200 mx-2" />
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleBulletList().run()}
+              active={editor.isActive("bulletList")}
+              title="Bullet List"
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M4 6h16M4 12h16M4 18h16"
+                />
+              </svg>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleOrderedList().run()}
+              active={editor.isActive("orderedList")}
+              title="Numbered List"
+            >
+              <span className="text-xs">1.</span>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().toggleBlockquote().run()}
+              active={editor.isActive("blockquote")}
+              title="Quote"
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
+                />
+              </svg>
+            </FormatButton>
+            <div className="w-px h-6 bg-stone-200 mx-2" />
+            <FormatButton
+              onClick={() => editor.chain().focus().setHorizontalRule().run()}
+              title="Horizontal Rule"
+            >
+              <span className="text-xs">—</span>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().undo().run()}
+              disabled={!editor.can().undo()}
+              title="Undo (Ctrl+Z)"
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M3 10h10a8 8 0 018 8v2M3 10l6 6m-6-6l6-6"
+                />
+              </svg>
+            </FormatButton>
+            <FormatButton
+              onClick={() => editor.chain().focus().redo().run()}
+              disabled={!editor.can().redo()}
+              title="Redo (Ctrl+Shift+Z)"
+            >
+              <svg
+                className="w-4 h-4"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M21 10h-10a8 8 0 00-8 8v2M21 10l-6 6m6-6l-6-6"
+                />
+              </svg>
+            </FormatButton>
+          </div>
+        )}
+
+        {/* Editor Content */}
+        <div className="flex-1 overflow-auto">
+          <div className="max-w-3xl mx-auto py-8 px-4">
+            <EditorContent
+              editor={editor}
+              className="prose prose-stone max-w-none min-h-[60vh] focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Generation Context Info */}
+        {editor && (
+          <div className="bg-stone-100 border-t border-stone-200 px-4 py-2 text-xs text-stone-500">
+            Context: {getCursorContext().before.length} chars before cursor,{" "}
+            {getCursorContext().after.length} chars after (10k max each
+            direction)
+          </div>
+        )}
+      </div>
+
+      {/* Generation Sidebar */}
+      <div className="editor-generation-shell w-80 bg-white border-l border-stone-200 flex flex-col">
+        <div className="p-4 border-b border-stone-200">
+          <h2 className="font-semibold text-stone-800">AI Generation</h2>
+        </div>
+
+        {/* Chapter Beats from Story Bible */}
+        {chapterOutline && (
+          <div className="border-b border-stone-200 bg-purple-50">
+            <button
+              onClick={() => setBeatsExpanded(!beatsExpanded)}
+              className="w-full p-4 flex items-center justify-between text-left hover:bg-purple-100/50 transition-colors"
+            >
+              <h3 className="text-sm font-semibold text-purple-800">
+                Chapter {chapterOutline.chapterNumber} Beats
+              </h3>
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-purple-600 bg-purple-100 px-2 py-0.5 rounded-full">
+                  {chapterOutline.beats.length} beats
+                </span>
+                <span
+                  className={`text-purple-400 text-xs transition-transform ${beatsExpanded ? "rotate-180" : ""}`}
+                >
+                  &#9660;
+                </span>
+              </div>
+            </button>
+            {beatsExpanded && (
+              <div className="px-4 pb-4">
+                <ul className="space-y-1.5">
+                  {chapterOutline.beats.map((beat, i) => (
+                    <li
+                      key={i}
+                      className="text-xs text-purple-700 flex items-start gap-2"
+                    >
+                      <span className="text-purple-400 font-mono">
+                        {i + 1}.
+                      </span>
+                      <span>{beat}</span>
+                    </li>
+                  ))}
+                </ul>
+                {chapterOutline.location && (
+                  <div className="mt-2 pt-2 border-t border-purple-200 text-xs text-purple-600">
+                    <span className="font-medium">Location:</span>{" "}
+                    {chapterOutline.location}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-auto p-4 space-y-4">
+          {/* Prompt Input */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-1">
+              Instructions (optional)
+            </label>
+            <textarea
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="e.g., Write a tense confrontation scene..."
+              rows={3}
+              className="w-full px-3 py-2 border border-stone-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-stone-400"
+            />
+          </div>
+
+          {/* Target Words */}
+          <div>
+            <label className="block text-sm font-medium text-stone-700 mb-1">
+              Target Words: {targetWordsDisplay}
+            </label>
+            <input
+              type="range"
+              min={100}
+              max={4000}
+              step={100}
+              value={targetWordsDisplay}
+              onChange={(e) => handleTargetWordsChange(Number(e.target.value))}
+              className="w-full"
+            />
+          </div>
+
+          {/* Auto-Accept Toggle */}
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={autoAccept}
+              onChange={(e) => setAutoAccept(e.target.checked)}
+              className="rounded"
+            />
+            <span className="text-stone-600">Auto-accept (skip preview)</span>
+          </label>
+
+          {/* Generate Button */}
+          <button
+            onMouseDown={captureGenerateContext}
+            onClick={() => generate()}
+            disabled={isGenerating || !!pendingContent}
+            className="w-full px-4 py-3 bg-stone-800 text-white rounded-lg hover:bg-stone-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+          >
+            {isGenerating ? (
+              <span className="flex items-center justify-center gap-2">
+                <span className="animate-spin w-4 h-4 border-2 border-white border-t-transparent rounded-full"></span>
+                Generating...
+              </span>
+            ) : pendingContent ? (
+              "Review pending content below"
+            ) : (
+              "Generate"
+            )}
+          </button>
+
+          {/* Preview Panel - shown when there's pending content */}
+          {pendingContent && (
+            <div className="border-2 border-amber-300 bg-amber-50 rounded-lg p-3 space-y-3">
+              <div className="text-xs font-medium text-amber-700 uppercase tracking-wide">
+                Preview - Not Yet Added
+              </div>
+              <div className="bg-white border border-amber-200 rounded p-3 max-h-48 overflow-y-auto font-serif text-sm text-stone-700 leading-relaxed">
+                {pendingContent}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={acceptPendingContent}
+                  className="flex-1 px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 font-medium text-sm"
+                >
+                  Accept
+                </button>
+                <button
+                  onClick={rejectPendingContent}
+                  className="flex-1 px-3 py-2 bg-red-500 text-white rounded-lg hover:bg-red-600 font-medium text-sm"
+                >
+                  Reject
+                </button>
+              </div>
+              <div className="text-xs text-amber-600">
+                {pendingContent.split(/\s+/).filter(Boolean).length} words •
+                Review before adding to document
+              </div>
+            </div>
+          )}
+
+          {/* Quick Actions */}
+          <div className="space-y-2">
+            <p className="text-sm font-medium text-stone-700">Quick Actions</p>
+            <div className="grid grid-cols-2 gap-2">
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Continue naturally")}
+                disabled={isGenerating}
+              >
+                Continue
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Write dialogue")}
+                disabled={isGenerating}
+              >
+                Dialogue
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Describe the scene")}
+                disabled={isGenerating}
+              >
+                Description
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Add tension and conflict")}
+                disabled={isGenerating}
+              >
+                Tension
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Write internal monologue")}
+                disabled={isGenerating}
+              >
+                Thoughts
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() => generate("Transition to next scene")}
+                disabled={isGenerating}
+              >
+                Transition
+              </QuickButton>
+              <QuickButton
+                onMouseDown={captureGenerateContext}
+                onClick={() =>
+                  generate(
+                    "[NONFICTION] Write clear, educational content with logical structure, factual accuracy, and engaging explanations",
+                  )
+                }
+                disabled={isGenerating}
+              >
+                Nonfiction
+              </QuickButton>
+            </div>
+          </div>
+
+          {/* Error Display */}
+          {error && (
+            <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          {/* Last Generation Info */}
+          {lastGeneration && (
+            <div className="p-3 bg-stone-100 rounded-lg text-sm space-y-2">
+              <div className="flex justify-between">
+                <span className="text-stone-600">Last generation</span>
+                <span className="font-medium">
+                  {lastGeneration.wordCount} words
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-600">Quality score</span>
+                <span
+                  className={`font-medium ${lastGeneration.qualityScore >= 0.75 ? "text-green-600" : "text-amber-600"}`}
+                >
+                  {Math.round(lastGeneration.qualityScore * 100)}%
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-600">Time</span>
+                <span className="font-medium">
+                  {(lastGeneration.metadata.latencyMs / 1000).toFixed(1)}s
+                </span>
+              </div>
+              {lastGeneration.qualityFallback && (
+                <div className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">
+                  <p className="font-medium">Best-effort fallback used</p>
+                  <p>
+                    {lastGeneration.qualityFallbackReason ||
+                      "Quality gates were not fully met, but text was returned to avoid a blank paid result."}
+                  </p>
+                </div>
+              )}
+              {lastGeneration.qualityIssues &&
+                lastGeneration.qualityIssues.length > 0 && (
+                  <div className="rounded-md border border-stone-200 bg-white p-2 text-xs text-stone-700">
+                    <p className="font-medium text-stone-800">
+                      Top quality flag
+                    </p>
+                    <p>{lastGeneration.qualityIssues[0]}</p>
+                  </div>
+                )}
+              <button
+                onMouseDown={captureGenerateContext}
+                onClick={regenerate}
+                disabled={isGenerating}
+                className="w-full mt-2 px-3 py-2 border border-stone-300 rounded-lg text-sm hover:bg-stone-50 disabled:opacity-50"
+              >
+                Regenerate with feedback
+              </button>
+            </div>
+          )}
+
+          {/* Features Info */}
+          <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg text-sm text-blue-800">
+            <p className="font-medium mb-1">10k Bidirectional Context</p>
+            <p className="text-blue-700 text-xs">
+              The AI sees up to 10,000 characters before AND after your cursor,
+              enabling seamless insertions anywhere in your text.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuickButton({
+  children,
+  onClick,
+  onMouseDown,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  onMouseDown?: () => void;
+  disabled: boolean;
+}): JSX.Element {
+  return (
+    <button
+      onMouseDown={onMouseDown}
+      onClick={onClick}
+      disabled={disabled}
+      className="px-3 py-2 text-sm border border-stone-300 rounded-lg hover:bg-stone-50 disabled:opacity-50"
+    >
+      {children}
+    </button>
+  );
+}
+
+function FormatButton({
+  children,
+  onClick,
+  active,
+  disabled,
+  title,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  title?: string;
+}): JSX.Element {
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className={`p-2 text-sm rounded hover:bg-stone-100 disabled:opacity-30 disabled:cursor-not-allowed ${
+        active ? "bg-stone-200 text-stone-900" : "text-stone-600"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}

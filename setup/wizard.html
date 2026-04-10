@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Magnum Opus Setup Wizard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #e4e4e7;
+    }
+
+    .wizard {
+      background: rgba(255, 255, 255, 0.05);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 24px;
+      padding: 48px;
+      max-width: 560px;
+      width: 90%;
+      box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    }
+
+    .logo {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+
+    .logo h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #f472b6, #c084fc, #60a5fa);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      margin-bottom: 8px;
+    }
+
+    .logo p {
+      color: #a1a1aa;
+      font-size: 1rem;
+    }
+
+    .step { display: none; }
+    .step.active { display: block; }
+
+    .step-indicator {
+      display: flex;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 32px;
+    }
+
+    .step-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.2);
+      transition: all 0.3s;
+    }
+
+    .step-dot.active { background: #c084fc; transform: scale(1.2); }
+    .step-dot.completed { background: #34d399; }
+
+    h2 {
+      font-size: 1.5rem;
+      margin-bottom: 8px;
+      color: #fff;
+    }
+
+    .step-desc {
+      color: #a1a1aa;
+      margin-bottom: 24px;
+      line-height: 1.6;
+    }
+
+    .provider-cards {
+      display: grid;
+      gap: 12px;
+      margin-bottom: 24px;
+    }
+
+    .provider-card {
+      background: rgba(255, 255, 255, 0.05);
+      border: 2px solid rgba(255, 255, 255, 0.1);
+      border-radius: 12px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .provider-card:hover {
+      border-color: rgba(192, 132, 252, 0.5);
+      background: rgba(255, 255, 255, 0.08);
+    }
+
+    .provider-card.selected {
+      border-color: #c084fc;
+      background: rgba(192, 132, 252, 0.15);
+    }
+
+    .provider-card h3 {
+      font-size: 1.1rem;
+      margin-bottom: 4px;
+    }
+
+    .provider-card p {
+      font-size: 0.85rem;
+      color: #a1a1aa;
+    }
+
+    .provider-card .badge {
+      display: inline-block;
+      background: #34d399;
+      color: #000;
+      font-size: 0.7rem;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 4px;
+      margin-left: 8px;
+    }
+
+    .form-group {
+      margin-bottom: 20px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.9rem;
+      font-weight: 500;
+      margin-bottom: 8px;
+      color: #d4d4d8;
+    }
+
+    input[type="text"],
+    input[type="password"] {
+      width: 100%;
+      padding: 14px 16px;
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      border-radius: 10px;
+      color: #fff;
+      font-size: 1rem;
+      transition: all 0.2s;
+    }
+
+    input:focus {
+      outline: none;
+      border-color: #c084fc;
+      box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.2);
+    }
+
+    input::placeholder { color: #71717a; }
+
+    .help-text {
+      font-size: 0.8rem;
+      color: #71717a;
+      margin-top: 8px;
+    }
+
+    .help-text a {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+
+    .help-text a:hover { text-decoration: underline; }
+
+    .btn-group {
+      display: flex;
+      gap: 12px;
+      margin-top: 32px;
+    }
+
+    button {
+      flex: 1;
+      padding: 14px 24px;
+      border-radius: 10px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      border: none;
+    }
+
+    .btn-secondary {
+      background: rgba(255, 255, 255, 0.1);
+      color: #fff;
+    }
+
+    .btn-secondary:hover { background: rgba(255, 255, 255, 0.15); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, #c084fc, #818cf8);
+      color: #fff;
+    }
+
+    .btn-primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 10px 20px -10px rgba(192, 132, 252, 0.5);
+    }
+
+    .btn-primary:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status {
+      padding: 12px 16px;
+      border-radius: 8px;
+      margin-top: 16px;
+      font-size: 0.9rem;
+    }
+
+    .status.testing {
+      background: rgba(96, 165, 250, 0.2);
+      border: 1px solid rgba(96, 165, 250, 0.3);
+      color: #60a5fa;
+    }
+
+    .status.success {
+      background: rgba(52, 211, 153, 0.2);
+      border: 1px solid rgba(52, 211, 153, 0.3);
+      color: #34d399;
+    }
+
+    .status.error {
+      background: rgba(248, 113, 113, 0.2);
+      border: 1px solid rgba(248, 113, 113, 0.3);
+      color: #f87171;
+    }
+
+    .feature-list {
+      list-style: none;
+      margin: 24px 0;
+    }
+
+    .feature-list li {
+      padding: 8px 0;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .feature-list li::before {
+      content: "✓";
+      color: #34d399;
+      font-weight: bold;
+    }
+
+    .success-icon {
+      font-size: 4rem;
+      text-align: center;
+      margin-bottom: 24px;
+    }
+
+    .command-box {
+      background: #000;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 0.9rem;
+      margin: 16px 0;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+
+    .command-box code {
+      color: #34d399;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .spinner {
+      display: inline-block;
+      width: 16px;
+      height: 16px;
+      border: 2px solid transparent;
+      border-top-color: currentColor;
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+      margin-right: 8px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wizard">
+    <div class="logo">
+      <h1>Magnum Opus</h1>
+      <p>AI-Powered Creative Writing Assistant</p>
+    </div>
+
+    <div class="step-indicator">
+      <div class="step-dot active" data-step="1"></div>
+      <div class="step-dot" data-step="2"></div>
+      <div class="step-dot" data-step="3"></div>
+      <div class="step-dot" data-step="4"></div>
+    </div>
+
+    <!-- Step 1: Welcome -->
+    <div class="step active" data-step="1">
+      <h2>Welcome to Magnum Opus</h2>
+      <p class="step-desc">
+        Let's get you set up in under 2 minutes. Magnum Opus uses your own AI API keys
+        so you have full control over costs and model selection.
+      </p>
+
+      <ul class="feature-list">
+        <li>Autonomous chapter & book writing</li>
+        <li>Story Bible with character tracking</li>
+        <li>Style learning from your samples</li>
+        <li>10,000 character context window</li>
+        <li>Ironclad auto-save (never lose work)</li>
+      </ul>
+
+      <div class="btn-group">
+        <button class="btn-primary" onclick="nextStep()">Get Started →</button>
+      </div>
+    </div>
+
+    <!-- Step 2: Choose Provider -->
+    <div class="step" data-step="2">
+      <h2>Choose Your AI Provider</h2>
+      <p class="step-desc">Select which AI service you want to use. You can change this later in settings.</p>
+
+      <div class="provider-cards">
+        <div class="provider-card" data-provider="groq" onclick="selectProvider('groq')">
+          <h3>Groq <span class="badge">Recommended</span></h3>
+          <p>Fastest inference, free tier available. Great for fiction writing.</p>
+        </div>
+
+        <div class="provider-card" data-provider="openai" onclick="selectProvider('openai')">
+          <h3>OpenAI</h3>
+          <p>GPT-4o and other models. Reliable, widely used.</p>
+        </div>
+
+        <div class="provider-card" data-provider="openai-compatible" onclick="selectProvider('openai-compatible')">
+          <h3>OpenAI Compatible</h3>
+          <p>Ollama, LMStudio, or any OpenAI-compatible API.</p>
+        </div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn-secondary" onclick="prevStep()">← Back</button>
+        <button class="btn-primary" id="provider-next" disabled onclick="nextStep()">Continue →</button>
+      </div>
+    </div>
+
+    <!-- Step 3: API Key -->
+    <div class="step" data-step="3">
+      <h2>Enter Your API Key</h2>
+      <p class="step-desc" id="key-instructions">Enter your API key below.</p>
+
+      <div class="form-group">
+        <label for="api-key">API Key</label>
+        <input type="password" id="api-key" placeholder="sk-..." autocomplete="off">
+        <p class="help-text" id="key-help"></p>
+      </div>
+
+      <div class="form-group" id="base-url-group" style="display: none;">
+        <label for="base-url">Base URL</label>
+        <input type="text" id="base-url" placeholder="http://localhost:11434/v1">
+        <p class="help-text">The API endpoint for your local server</p>
+      </div>
+
+      <div class="form-group" id="model-group" style="display: none;">
+        <label for="model">Model Name</label>
+        <input type="text" id="model" placeholder="llama3.1:8b">
+        <p class="help-text">The model to use for generation</p>
+      </div>
+
+      <div id="test-status"></div>
+
+      <div class="btn-group">
+        <button class="btn-secondary" onclick="prevStep()">← Back</button>
+        <button class="btn-primary" id="test-btn" onclick="testAndSave()">Test Connection →</button>
+      </div>
+    </div>
+
+    <!-- Step 4: Complete -->
+    <div class="step" data-step="4">
+      <div class="success-icon">🎉</div>
+      <h2>You're All Set!</h2>
+      <p class="step-desc">
+        Magnum Opus is configured and ready to use. Your settings have been saved.
+      </p>
+
+      <div class="command-box">
+        <code>npm run dev</code>
+      </div>
+      <p class="help-text" style="text-align: center;">
+        Run this command to start Magnum Opus, then open <a href="http://localhost:5173">localhost:5173</a>
+      </p>
+
+      <ul class="feature-list">
+        <li>Create a new project</li>
+        <li>Set up your Story Bible</li>
+        <li>Start writing with AI assistance</li>
+      </ul>
+
+      <div class="btn-group">
+        <button class="btn-primary" onclick="launchApp()">Launch Magnum Opus →</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentStep = 1;
+    let selectedProvider = null;
+    let config = {};
+
+    function updateStepIndicator() {
+      document.querySelectorAll('.step-dot').forEach((dot, i) => {
+        dot.classList.remove('active', 'completed');
+        if (i + 1 === currentStep) dot.classList.add('active');
+        if (i + 1 < currentStep) dot.classList.add('completed');
+      });
+
+      document.querySelectorAll('.step').forEach(step => {
+        step.classList.remove('active');
+        if (parseInt(step.dataset.step) === currentStep) step.classList.add('active');
+      });
+    }
+
+    function nextStep() {
+      if (currentStep < 4) {
+        currentStep++;
+        updateStepIndicator();
+      }
+    }
+
+    function prevStep() {
+      if (currentStep > 1) {
+        currentStep--;
+        updateStepIndicator();
+      }
+    }
+
+    function selectProvider(provider) {
+      selectedProvider = provider;
+      config.provider = provider;
+
+      document.querySelectorAll('.provider-card').forEach(card => {
+        card.classList.remove('selected');
+        if (card.dataset.provider === provider) card.classList.add('selected');
+      });
+
+      document.getElementById('provider-next').disabled = false;
+
+      // Update step 3 based on provider
+      const instructions = document.getElementById('key-instructions');
+      const keyHelp = document.getElementById('key-help');
+      const baseUrlGroup = document.getElementById('base-url-group');
+      const modelGroup = document.getElementById('model-group');
+      const keyInput = document.getElementById('api-key');
+
+      baseUrlGroup.style.display = 'none';
+      modelGroup.style.display = 'none';
+
+      switch (provider) {
+        case 'groq':
+          instructions.textContent = 'Enter your Groq API key to enable fast AI generation.';
+          keyHelp.innerHTML = 'Get your free key at <a href="https://console.groq.com/keys" target="_blank">console.groq.com/keys</a>';
+          keyInput.placeholder = 'gsk_...';
+          break;
+        case 'openai':
+          instructions.textContent = 'Enter your OpenAI API key.';
+          keyHelp.innerHTML = 'Get your key at <a href="https://platform.openai.com/api-keys" target="_blank">platform.openai.com/api-keys</a>';
+          keyInput.placeholder = 'sk-...';
+          break;
+        case 'openai-compatible':
+          instructions.textContent = 'Configure your local or compatible API.';
+          keyHelp.innerHTML = 'Leave blank if your server doesn\'t require authentication';
+          keyInput.placeholder = 'Optional API key';
+          baseUrlGroup.style.display = 'block';
+          modelGroup.style.display = 'block';
+          break;
+      }
+    }
+
+    async function testAndSave() {
+      const testBtn = document.getElementById('test-btn');
+      const status = document.getElementById('test-status');
+      const apiKey = document.getElementById('api-key').value.trim();
+      const baseUrl = document.getElementById('base-url').value.trim();
+      const model = document.getElementById('model').value.trim();
+
+      // Validation
+      if (selectedProvider !== 'openai-compatible' && !apiKey) {
+        status.className = 'status error';
+        status.textContent = 'Please enter your API key';
+        return;
+      }
+
+      if (selectedProvider === 'openai-compatible' && !baseUrl) {
+        status.className = 'status error';
+        status.textContent = 'Please enter the base URL for your API';
+        return;
+      }
+
+      // Build config
+      config = {
+        provider: selectedProvider,
+        apiKey: apiKey,
+        baseUrl: selectedProvider === 'openai-compatible' ? baseUrl : null,
+        model: model || getDefaultModel(selectedProvider),
+      };
+
+      // Show testing state
+      testBtn.disabled = true;
+      status.className = 'status testing';
+      status.innerHTML = '<span class="spinner"></span>Testing connection...';
+
+      try {
+        // Save config first
+        const saveRes = await fetch('/api/setup/save', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(config),
+        });
+
+        if (!saveRes.ok) throw new Error('Failed to save configuration');
+
+        // Test the connection
+        const testRes = await fetch('/api/provider', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ test: true }),
+        });
+
+        if (!testRes.ok) {
+          const err = await testRes.json();
+          throw new Error(err.error || 'Connection test failed');
+        }
+
+        status.className = 'status success';
+        status.textContent = '✓ Connection successful!';
+
+        setTimeout(() => nextStep(), 1000);
+
+      } catch (err) {
+        status.className = 'status error';
+        status.textContent = '✗ ' + err.message;
+        testBtn.disabled = false;
+      }
+    }
+
+    function getDefaultModel(provider) {
+      switch (provider) {
+        case 'groq': return 'llama-3.3-70b-versatile';
+        case 'openai': return 'gpt-4o';
+        case 'openai-compatible': return 'llama3.1:8b';
+        default: return '';
+      }
+    }
+
+    function launchApp() {
+      window.location.href = '/';
+    }
+
+    // Check if already configured
+    async function checkExistingConfig() {
+      try {
+        const res = await fetch('/api/provider');
+        const data = await res.json();
+        if (data.provider && data.apiKey) {
+          // Already configured, offer to skip
+          if (confirm('Magnum Opus is already configured. Launch the app?')) {
+            window.location.href = '/';
+          }
+        }
+      } catch (e) {
+        // Not configured, continue with wizard
+      }
+    }
+
+    checkExistingConfig();
+  </script>
+</body>
+</html>

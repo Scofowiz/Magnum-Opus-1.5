@@ -1,0 +1,505 @@
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Editor } from "./components/Editor";
+import { ProjectList } from "./components/ProjectList";
+import { StoryBible } from "./components/StoryBible";
+import { StyleLearning } from "./components/StyleLearning";
+import { Settings } from "./components/Settings";
+import { AutonomousWriter } from "./components/AutonomousWriter";
+import { MagnumBackground } from "./components/MagnumBackground";
+import { MetricsDashboard } from "./components/MetricsDashboard";
+import { api } from "./api/client";
+import type {
+  Chapter,
+  Project,
+  ProjectSummary,
+  View,
+} from "./types/magnumOpus";
+import { playUiSound } from "./utils/uiSound";
+
+export default function App(): React.JSX.Element {
+  const [view, setView] = useState<View>("projects");
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [currentProject, setCurrentProject] = useState<Project | null>(null);
+  const [currentChapter, setCurrentChapter] = useState<Chapter | null>(null);
+  const [serverStatus, setServerStatus] = useState<
+    "checking" | "online" | "offline"
+  >("checking");
+  const currentProjectRef = useRef<Project | null>(null);
+  const currentChapterRef = useRef<Chapter | null>(null);
+  const autonomousSyncRef = useRef<{
+    sessionId: string | null;
+    generatedWords: number;
+    lastCommittedAt: string | null;
+  }>({
+    sessionId: null,
+    generatedWords: 0,
+    lastCommittedAt: null,
+  });
+
+  useEffect(() => {
+    currentProjectRef.current = currentProject;
+    currentChapterRef.current = currentChapter;
+  }, [currentChapter, currentProject]);
+
+  // Check server status
+  useEffect(() => {
+    api.health
+      .get()
+      .then(() => setServerStatus("online"))
+      .catch(() => setServerStatus("offline"));
+  }, []);
+
+  // Load projects
+  useEffect(() => {
+    if (serverStatus === "online") {
+      api.projects
+        .list()
+        .then((data) => setProjects(Array.isArray(data) ? data : []))
+        .catch(console.error);
+    }
+  }, [serverStatus]);
+
+  const createProject = async (title: string, genre: string): Promise<void> => {
+    const project = await api.projects.create({ title, genre });
+    setProjects((previous) => [...previous, project]);
+    setCurrentProject(project);
+    setCurrentChapter(project.chapters[0]);
+    setView("editor");
+  };
+
+  const openProject = async (id: string): Promise<void> => {
+    const project = await api.projects.get(id);
+    setCurrentProject(project);
+    setCurrentChapter(project.chapters[0] || null);
+    setView("editor");
+  };
+
+  const deleteProject = async (id: string): Promise<void> => {
+    await api.projects.remove(id);
+    setProjects((previous) => previous.filter((project) => project.id !== id));
+    if (currentProject?.id === id) {
+      setCurrentProject(null);
+      setCurrentChapter(null);
+      setView("projects");
+    }
+  };
+
+  const updateProject = async (updates: Partial<Project>): Promise<void> => {
+    const activeProject = currentProjectRef.current;
+    if (!activeProject) return;
+    const updated = await api.projects.update(activeProject.id, updates);
+    setCurrentProject(updated);
+    setProjects((previous) =>
+      previous.map((project) =>
+        project.id === updated.id ? updated : project,
+      ),
+    );
+  };
+
+  const updateChapterLocally = useCallback(
+    (chapterId: string, updates: Partial<Chapter>): void => {
+      setCurrentProject((previous) => {
+        if (!previous) return previous;
+        const newChapters = previous.chapters.map((chapter) =>
+          chapter.id === chapterId ? { ...chapter, ...updates } : chapter,
+        );
+        const wordCount = newChapters.reduce(
+          (total, chapter) => total + (chapter.wordCount || 0),
+          0,
+        );
+        return { ...previous, chapters: newChapters, wordCount };
+      });
+
+      setCurrentChapter((previous) =>
+        previous && previous.id === chapterId
+          ? { ...previous, ...updates }
+          : previous,
+      );
+    },
+    [],
+  );
+
+  const updateChapter = async (
+    chapterId: string,
+    updates: Partial<Chapter>,
+  ): Promise<void> => {
+    const activeProject = currentProjectRef.current;
+    if (!activeProject) return;
+    const updated = await api.projects.updateChapter(
+      activeProject.id,
+      chapterId,
+      updates,
+    );
+    updateChapterLocally(chapterId, updated);
+  };
+
+  const refreshProject = useCallback(async (): Promise<void> => {
+    const activeProject = currentProjectRef.current;
+    if (!activeProject) return;
+
+    const project = await api.projects.get(activeProject.id);
+    setCurrentProject(project);
+    setProjects((previous) =>
+      previous.map((summary) =>
+        summary.id === project.id ? project : summary,
+      ),
+    );
+
+    const activeChapter = currentChapterRef.current;
+    if (activeChapter) {
+      const updatedChapter = project.chapters.find(
+        (chapter) => chapter.id === activeChapter.id,
+      );
+      setCurrentChapter(updatedChapter || project.chapters[0] || null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!currentProject?.id || view !== "editor") {
+      return;
+    }
+
+    let cancelled = false;
+    let pollTimer: ReturnType<typeof setTimeout> | null = null;
+    const projectId = currentProject.id;
+
+    const pollAutonomousSessions = async (): Promise<void> => {
+      try {
+        const activeSessions = await api.autonomous.list();
+        const sessionSummary = activeSessions.find(
+          (session) => session.projectId === projectId,
+        );
+
+        if (!sessionSummary) {
+          const hadTrackedSession = Boolean(
+            autonomousSyncRef.current.sessionId,
+          );
+          autonomousSyncRef.current = {
+            sessionId: null,
+            generatedWords: 0,
+            lastCommittedAt: null,
+          };
+          if (hadTrackedSession) {
+            await refreshProject();
+          }
+          return;
+        }
+
+        const session = await api.autonomous.get(sessionSummary.id);
+        const previousSync = autonomousSyncRef.current;
+        autonomousSyncRef.current = {
+          sessionId: session.id,
+          generatedWords: session.generatedWords,
+          lastCommittedAt: session.lastCommittedAt || null,
+        };
+
+        const hasFreshCommit = Boolean(
+          session.lastCommittedAt &&
+          session.lastCommittedAt !== previousSync.lastCommittedAt &&
+          !session.pendingDraft,
+        );
+
+        const hasVisibleWordChange = Boolean(
+          !session.pendingDraft &&
+          (session.generatedWords !== previousSync.generatedWords ||
+            session.id !== previousSync.sessionId),
+        );
+
+        if (hasFreshCommit || hasVisibleWordChange) {
+          await refreshProject();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to sync background autonomous session:", error);
+        }
+      } finally {
+        if (!cancelled) {
+          if (autonomousSyncRef.current.sessionId) {
+            pollTimer = setTimeout(() => {
+              void pollAutonomousSessions();
+            }, 2000);
+          } else {
+            pollTimer = null;
+          }
+        }
+      }
+    };
+
+    pollTimer = setTimeout(() => {
+      void pollAutonomousSessions();
+    }, 1500);
+
+    return (): void => {
+      cancelled = true;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+      }
+    };
+  }, [currentProject?.id, refreshProject, view]);
+
+  const addChapter = async (): Promise<void> => {
+    if (!currentProject) return;
+    const chapter = await api.projects.createChapter(currentProject.id);
+    const newProject = {
+      ...currentProject,
+      chapters: [...currentProject.chapters, chapter],
+    };
+    setCurrentProject(newProject);
+    setCurrentChapter(chapter);
+  };
+
+  const deleteChapter = async (chapterId: string): Promise<void> => {
+    if (!currentProject || currentProject.chapters.length <= 1) return;
+    await api.projects.deleteChapter(currentProject.id, chapterId);
+    const newChapters = currentProject.chapters.filter(
+      (c) => c.id !== chapterId,
+    );
+    const newProject = { ...currentProject, chapters: newChapters };
+    setCurrentProject(newProject);
+    if (currentChapter?.id === chapterId) {
+      setCurrentChapter(newChapters[0] || null);
+    }
+  };
+
+  if (serverStatus === "checking") {
+    return (
+      <div className="magnum-app-shell min-h-screen flex items-center justify-center px-6">
+        <div className="glass-panel glass-panel-strong w-full max-w-md text-center px-8 py-10">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-white/15 bg-white/5">
+            <div className="animate-spin h-6 w-6 rounded-full border-2 border-white/20 border-t-[var(--magnum-accent)]"></div>
+          </div>
+          <p className="text-lg font-semibold text-[var(--magnum-text)]">
+            Connecting to Magnum Opus
+          </p>
+          <p className="mt-2 text-sm text-[var(--magnum-muted)]">
+            Checking the local writing engine and services.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (serverStatus === "offline") {
+    return (
+      <div className="magnum-app-shell min-h-screen flex items-center justify-center px-6">
+        <div className="glass-panel glass-panel-strong max-w-md p-8 text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--magnum-accent-soft)] bg-[var(--magnum-accent-muted)] text-[var(--magnum-accent)]">
+            !
+          </div>
+          <h1 className="mb-2 text-2xl font-bold text-[var(--magnum-text)]">
+            Server Offline
+          </h1>
+          <p className="mb-4 text-[var(--magnum-muted)]">
+            The Magnum Opus server is not running. Start it with:
+          </p>
+          <code className="mb-4 block rounded-xl border border-white/10 bg-black/25 p-4 text-sm text-[var(--magnum-accent)]">
+            npm run server
+          </code>
+          <button
+            onClick={() => window.location.reload()}
+            className="accent-button px-4 py-2"
+          >
+            Retry Connection
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="magnum-app-shell min-h-screen">
+      <MagnumBackground />
+
+      <nav className="relative z-20 px-4 pt-4">
+        <div className="magnum-nav-shell glass-panel glass-panel-strong mx-auto max-w-7xl px-4">
+          <div className="flex min-h-[3.75rem] items-center justify-between gap-4">
+            <div className="flex items-center gap-6">
+              <div className="magnum-brand-lockup flex items-center gap-3">
+                <div className="relative">
+                  <div className="absolute h-3 w-3 rounded-full bg-[var(--magnum-accent)] opacity-70 animate-ping"></div>
+                  <div className="relative h-3 w-3 rounded-full bg-[var(--magnum-accent)]"></div>
+                </div>
+                <h1 className="magnum-title text-xl font-semibold tracking-[0.08em] text-[var(--magnum-text)]">
+                  Magnum Opus
+                </h1>
+                <span className="magnum-brand-badge rounded-full border border-[var(--magnum-accent-soft)] bg-[var(--magnum-accent-muted)] px-2 py-0.5 text-[10px] font-semibold tracking-[0.18em] text-[var(--magnum-accent)]">
+                  AI
+                </span>
+              </div>
+              <div className="magnum-nav-cluster flex flex-wrap gap-1">
+                <NavButton
+                  active={view === "projects"}
+                  onClick={() => setView("projects")}
+                >
+                  Projects
+                </NavButton>
+                {currentProject && (
+                  <>
+                    <NavButton
+                      active={view === "editor"}
+                      onClick={() => setView("editor")}
+                    >
+                      Editor
+                    </NavButton>
+                    <NavButton
+                      active={view === "autonomous"}
+                      onClick={() => setView("autonomous")}
+                    >
+                      Autonomous
+                    </NavButton>
+                    <NavButton
+                      active={view === "story-bible"}
+                      onClick={() => setView("story-bible")}
+                    >
+                      Story Bible
+                    </NavButton>
+                  </>
+                )}
+                <NavButton
+                  active={view === "style"}
+                  onClick={() => setView("style")}
+                >
+                  Style
+                </NavButton>
+                <NavButton
+                  active={view === "metrics"}
+                  onClick={() => setView("metrics")}
+                >
+                  Metrics
+                </NavButton>
+                <NavButton
+                  active={view === "settings"}
+                  onClick={() => setView("settings")}
+                >
+                  Settings
+                </NavButton>
+              </div>
+            </div>
+            {currentProject && (
+              <div className="hidden items-center gap-3 text-sm md:flex">
+                <div className="glass-pill px-3 py-1.5">
+                  <span className="text-[var(--magnum-text)]">
+                    {currentProject.title}
+                  </span>
+                  <span className="mx-2 text-[var(--magnum-line)]">•</span>
+                  <span className="font-medium text-[var(--magnum-accent)]">
+                    {currentProject.wordCount.toLocaleString()}
+                  </span>
+                  <span className="ml-1 text-[var(--magnum-muted)]">words</span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      </nav>
+
+      {/* Main Content */}
+      <main className="relative z-10 px-4 pb-6 pt-4">
+        {view === "projects" && (
+          <ProjectList
+            projects={projects}
+            onOpen={openProject}
+            onCreate={createProject}
+            onDelete={deleteProject}
+          />
+        )}
+        {view === "editor" && currentProject && (
+          <Editor
+            project={currentProject}
+            chapter={currentChapter}
+            chapters={currentProject.chapters}
+            onChapterChange={setCurrentChapter}
+            onChapterUpdate={updateChapter}
+            onChapterLocalUpdate={updateChapterLocally}
+            onAddChapter={addChapter}
+            onDeleteChapter={deleteChapter}
+            onProjectUpdate={updateProject}
+          />
+        )}
+        {view === "autonomous" && currentProject && (
+          <div className="mx-auto max-w-6xl p-2 md:p-6">
+            <AutonomousWriter
+              project={currentProject}
+              chapters={currentProject.chapters}
+              onChapterUpdate={updateChapter}
+              onRefreshProject={refreshProject}
+              onWordsGenerated={(newTotal) => {
+                setCurrentProject((previous) =>
+                  previous ? { ...previous, wordCount: newTotal } : previous,
+                );
+                setProjects((previous) =>
+                  previous.map((project) =>
+                    project.id === currentProject.id
+                      ? { ...project, wordCount: newTotal }
+                      : project,
+                  ),
+                );
+              }}
+            />
+          </div>
+        )}
+        {view === "story-bible" && currentProject && (
+          <StoryBible
+            project={currentProject}
+            onUpdate={(storyBible) => updateProject({ storyBible })}
+          />
+        )}
+        {view === "style" && <StyleLearning />}
+        {view === "metrics" && <MetricsDashboard />}
+        {view === "settings" && <Settings />}
+      </main>
+    </div>
+  );
+}
+
+function NavButton({
+  children,
+  active,
+  onClick,
+}: {
+  children: React.ReactNode;
+  active: boolean;
+  onClick: () => void;
+}): React.JSX.Element {
+  const createParticles = (e: React.MouseEvent): void => {
+    const button = e.currentTarget;
+    const rect = button.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    void playUiSound("tap");
+
+    for (let i = 0; i < 8; i++) {
+      const particle = document.createElement("span");
+      particle.className = "nav-particle";
+      particle.style.cssText = `
+        position: absolute;
+        left: ${x}px;
+        top: ${y}px;
+        width: 3px;
+        height: 3px;
+        border-radius: 50%;
+        background: ${["#fffdf2", "#f4d35e", "#fff7cc"][Math.floor(Math.random() * 3)]};
+        pointer-events: none;
+        box-shadow: 0 0 10px rgba(244, 211, 94, 0.45);
+        animation: particle-burst 0.45s ease-out forwards;
+        --tx: ${(Math.random() - 0.5) * 44}px;
+        --ty: ${(Math.random() - 0.5) * 32}px;
+      `;
+      button.appendChild(particle);
+      setTimeout(() => particle.remove(), 460);
+    }
+    onClick();
+  };
+
+  return (
+    <button
+      onClick={createParticles}
+      className={`nav-button relative overflow-visible px-3 py-2 rounded-xl transition-all duration-200 ${
+        active ? "nav-button-active" : "nav-button-idle"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
