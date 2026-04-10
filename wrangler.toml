@@ -1,5 +1,5 @@
 name = "magnum-opus"
-main = "src/index.ts"  # Correct entry point
+main = "src/worker.ts"  # CF Workers entry point (separate from React frontend)
 compatibility_date = "2024-01-01"
 
 [env.production]

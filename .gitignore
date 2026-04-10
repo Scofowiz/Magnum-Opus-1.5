@@ -12,6 +12,10 @@ coverage/
 .novawrite-data-screenshots/
 recovery_from_icloud_books_*/
 
+# Cloudflare Workers
+.wrangler/
+wrangler.local.toml
+
 *.log
 npm-debug.log*
 
